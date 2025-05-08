@@ -1,0 +1,112 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# VS Code related
+.vscode/
+*.code-workspace
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+**/build/
+pubspec.lock
+.fvm/
+.packages
+.dart_tool_isolates/
+
+# Generated files
+**/*.g.dart
+**/*.freezed.dart
+*.g.part
+*.freezed.part
+*.mocks.dart
+*.config.dart
+generated_plugin_registrant.dart
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Full directories to exclude
+/android/
+/ios/
+/docs/
+/windows/
+/macos/
+/web/
+/linux/
+
+# Build artifacts and binaries
+*.apk
+*.aab
+*.app
+*.ipa
+
+# Firebase related
+google-services.json
+GoogleService-Info.plist
+firebase_options.dart
+
+# Dependency files
+yarn.lock
+package-lock.json
+Podfile.lock
+Gemfile.lock
+
+# IDE metafiles
+.classpath
+.project
+.settings/
+*.swp
+*.swo
+*.swm
+*.swn
+.metals/
+
+# Keystore files
+*.jks
+*.keystore
+key.properties
+
+# Media files
+*.mp4
+*.mov
+*.wmv
+*.avi
+*.gif
+*.webp
+*.psd
+*.ai
+*.sketch
+
+# Temporary files
+*.bak
+*.tmp
+*.temp
+*~
+
+# Coverage
+/coverage/
