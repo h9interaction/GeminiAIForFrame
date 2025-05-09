@@ -159,7 +159,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       _voiceName = GeminiVoiceName.values.firstWhere(
         (e) =>
             e.toString().split('.').last ==
-            (prefs.getString('voice_name') ?? 'Charon'),
+            (prefs.getString('voice_name') ?? 'Kore'),
         orElse: () => GeminiVoiceName.Puck,
       );
     });
