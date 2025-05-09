@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
@@ -146,27 +147,45 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
 
   Future<void> _loadPrefs() async {
     final prefs = await SharedPreferences.getInstance();
+
+    // 시스템 지시문을 외부 파일에서 로드
+    String defaultSystemInstruction = await _loadSystemInstructionsFromAsset();
+
     setState(() {
       _apiKeyController.text = prefs.getString('api_key') ??
-          'AIzaSyAkcwD2ojyCaH78lNuK4YcujSsIkXN5MPI';
-      _systemInstructionController.text = prefs
-              .getString('system_instruction') ??
-          'The stream of images are coming live from the user\'s smart glasses, they are not a recorded video. For example, don\'t say "the person in the video", say "the person in front of you" if you are referring to someone you can see in the images. If an image is blurry, don\'t say the image is too blurry, wait for subsequent images that will arrive in the coming few seconds that might stabilize focus and be easier to process.\n\nAfter the user asks a question, never restate the question but instead directly answer it. No need to start responding when the images come in, wait for the user to start talking and only refer to the live images when relevant.\n\nTry not to repeat what the user is asking unless you\'re really unsure.';
+          'AIzaSyBe0sZ7N3Fmt31J0_gfOOh29DeFJV2E4HU';
+      _systemInstructionController.text =
+          prefs.getString('system_instruction') ?? defaultSystemInstruction;
       _voiceName = GeminiVoiceName.values.firstWhere(
         (e) =>
             e.toString().split('.').last ==
-            (prefs.getString('voice_name') ?? 'Puck'),
+            (prefs.getString('voice_name') ?? 'Charon'),
         orElse: () => GeminiVoiceName.Puck,
       );
     });
   }
 
+  // 시스템 지시문을 외부 파일에서 로드하는 함수
+  Future<String> _loadSystemInstructionsFromAsset() async {
+    try {
+      return await rootBundle.loadString('assets/system_instructions.txt');
+    } catch (e) {
+      _log.severe('Failed to load system instructions: $e');
+      // 파일 로드 실패시 기본값 반환
+      return '당신은 사용자의 스마트 글래스에서 실시간으로 전송되는 이미지를 보고 있습니다. 이는 녹화된 영상이 아닌 실시간 영상입니다. 모든 응답은 반드시 한국어로 제공해 주세요.';
+    }
+  }
+
+  // SharedPreferences에 설정 저장하는 함수
   Future<void> _savePrefs() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('api_key', _apiKeyController.text);
     await prefs.setString(
         'system_instruction', _systemInstructionController.text);
     await prefs.setString('voice_name', _voiceName.name);
+
+    // 저장 완료 알림
+    _appendEvent('설정이 저장되었습니다.');
   }
 
   /// This application uses Gemini's realtime API over WebSockets.
