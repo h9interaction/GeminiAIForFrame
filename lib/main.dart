@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
+import 'package:frame_realtime_gemini_voicevision/api_key_manager.dart';
 import 'package:frame_realtime_gemini_voicevision/audio_upsampler.dart';
 import 'package:frame_realtime_gemini_voicevision/gemini_realtime.dart';
 import 'package:logging/logging.dart';
@@ -20,7 +21,16 @@ import 'package:frame_msg/tx/plain_text.dart';
 import 'package:simple_frame_app/simple_frame_app.dart';
 import 'foreground_service.dart';
 
-void main() {
+void main() async {
+  // 위젯 바인딩 초기화
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // apikey.env 파일에서 API 키 로드 시도
+  String? apiKeyFromEnvFile = await ApiKeyManager.loadApiKeyFromEnvFile();
+  if (apiKeyFromEnvFile != null && apiKeyFromEnvFile.isNotEmpty) {
+    debugPrint('apikey.env 파일에서 API 키가 성공적으로 로드되었습니다.');
+  }
+
   // Set up Android foreground service
   initializeForegroundService();
 
@@ -151,9 +161,16 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     // 시스템 지시문을 외부 파일에서 로드
     String defaultSystemInstruction = await _loadSystemInstructionsFromAsset();
 
+    // API 키 관리자에서 API 키 로드
+    String? apiKey = await ApiKeyManager.getApiKey();
+
+    // 저장된 API 키가 없으면 샘플 키나 빈 문자열 사용
+    if (apiKey == null || apiKey.isEmpty) {
+      apiKey = ApiKeyManager.getSampleApiKey();
+    }
+
     setState(() {
-      _apiKeyController.text = prefs.getString('api_key') ??
-          'AIzaSyBe0sZ7N3Fmt31J0_gfOOh29DeFJV2E4HU';
+      _apiKeyController.text = apiKey!;
       _systemInstructionController.text =
           prefs.getString('system_instruction') ?? defaultSystemInstruction;
       _voiceName = GeminiVoiceName.values.firstWhere(
@@ -179,7 +196,10 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   // SharedPreferences에 설정 저장하는 함수
   Future<void> _savePrefs() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('api_key', _apiKeyController.text);
+
+    // API 키 저장에 ApiKeyManager 사용
+    await ApiKeyManager.saveApiKey(_apiKeyController.text);
+
     await prefs.setString(
         'system_instruction', _systemInstructionController.text);
     await prefs.setString('voice_name', _voiceName.name);
@@ -453,31 +473,53 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
               mainAxisAlignment: MainAxisAlignment.start,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Row(
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _apiKeyController,
-                        decoration: const InputDecoration(
-                            hintText: 'Enter Gemini API Key'),
-                      ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _apiKeyController,
+                            decoration: const InputDecoration(
+                              hintText: 'Enter Gemini API Key',
+                              helperText: '보안을 위해 API 키는 안전하게 보관됩니다',
+                              helperStyle: TextStyle(
+                                fontSize: 12,
+                                color: Colors.amber,
+                              ),
+                              prefixIcon: Icon(Icons.security),
+                            ),
+                            obscureText: true, // API 키를 마스킹 처리
+                            enableSuggestions: false,
+                            autocorrect: false,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        DropdownButton<GeminiVoiceName>(
+                          value: _voiceName,
+                          onChanged: (GeminiVoiceName? newValue) {
+                            setState(() {
+                              _voiceName = newValue!;
+                            });
+                          },
+                          items: GeminiVoiceName.values
+                              .map<DropdownMenuItem<GeminiVoiceName>>(
+                                  (GeminiVoiceName value) {
+                            return DropdownMenuItem<GeminiVoiceName>(
+                              value: value,
+                              child: Text(value.toString().split('.').last),
+                            );
+                          }).toList(),
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 10),
-                    DropdownButton<GeminiVoiceName>(
-                      value: _voiceName,
-                      onChanged: (GeminiVoiceName? newValue) {
-                        setState(() {
-                          _voiceName = newValue!;
-                        });
-                      },
-                      items: GeminiVoiceName.values
-                          .map<DropdownMenuItem<GeminiVoiceName>>(
-                              (GeminiVoiceName value) {
-                        return DropdownMenuItem<GeminiVoiceName>(
-                          value: value,
-                          child: Text(value.toString().split('.').last),
-                        );
-                      }).toList(),
+                    const Text(
+                      'API 키는 앱 내에 암호화되어 저장됩니다. GitHub에 푸시하지 마세요.',
+                      style: TextStyle(
+                        color: Colors.grey,
+                        fontSize: 12,
+                      ),
                     ),
                   ],
                 ),

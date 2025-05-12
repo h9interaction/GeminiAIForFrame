@@ -35,6 +35,14 @@ pubspec.lock
 .packages
 .dart_tool_isolates/
 
+# Environment variables
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+apikey.env
+
 # Generated files
 **/*.g.dart
 **/*.freezed.dart
