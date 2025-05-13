@@ -88,6 +88,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   final _eventLogController = ScrollController();
   static const _textStyle = TextStyle(fontSize: 20);
   String? _errorMsg;
+  bool _isSettingsExpanded = true; // 설정 섹션 확장/축소 상태
 
   MainAppState() {
     // filter logging
@@ -473,62 +474,73 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
               mainAxisAlignment: MainAxisAlignment.start,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
+                ExpansionTile(
+                  title: const Text('설정'),
+                  initiallyExpanded: _isSettingsExpanded,
+                  onExpansionChanged: (bool expanded) {
+                    setState(() {
+                      _isSettingsExpanded = expanded;
+                    });
+                  },
+                  children: <Widget>[
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _apiKeyController,
-                            decoration: const InputDecoration(
-                              hintText: 'Enter Gemini API Key',
-                              helperText: '보안을 위해 API 키는 안전하게 보관됩니다',
-                              helperStyle: TextStyle(
-                                fontSize: 12,
-                                color: Colors.amber,
+                        Row(
+                          children: [
+                            Expanded(
+                              child: TextField(
+                                controller: _apiKeyController,
+                                decoration: const InputDecoration(
+                                  hintText: 'Enter Gemini API Key',
+                                  helperText: '보안을 위해 API 키는 안전하게 보관됩니다',
+                                  helperStyle: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.amber,
+                                  ),
+                                  prefixIcon: Icon(Icons.security),
+                                ),
+                                obscureText: true, // API 키를 마스킹 처리
+                                enableSuggestions: false,
+                                autocorrect: false,
                               ),
-                              prefixIcon: Icon(Icons.security),
                             ),
-                            obscureText: true, // API 키를 마스킹 처리
-                            enableSuggestions: false,
-                            autocorrect: false,
-                          ),
+                            const SizedBox(width: 10),
+                            DropdownButton<GeminiVoiceName>(
+                              value: _voiceName,
+                              onChanged: (GeminiVoiceName? newValue) {
+                                setState(() {
+                                  _voiceName = newValue!;
+                                });
+                              },
+                              items: GeminiVoiceName.values
+                                  .map<DropdownMenuItem<GeminiVoiceName>>(
+                                      (GeminiVoiceName value) {
+                                return DropdownMenuItem<GeminiVoiceName>(
+                                  value: value,
+                                  child: Text(value.toString().split('.').last),
+                                );
+                              }).toList(),
+                            ),
+                          ],
                         ),
-                        const SizedBox(width: 10),
-                        DropdownButton<GeminiVoiceName>(
-                          value: _voiceName,
-                          onChanged: (GeminiVoiceName? newValue) {
-                            setState(() {
-                              _voiceName = newValue!;
-                            });
-                          },
-                          items: GeminiVoiceName.values
-                              .map<DropdownMenuItem<GeminiVoiceName>>(
-                                  (GeminiVoiceName value) {
-                            return DropdownMenuItem<GeminiVoiceName>(
-                              value: value,
-                              child: Text(value.toString().split('.').last),
-                            );
-                          }).toList(),
+                        const Text(
+                          'API 키는 앱 내에 암호화되어 저장됩니다. GitHub에 푸시하지 마세요.',
+                          style: TextStyle(
+                            color: Colors.grey,
+                            fontSize: 12,
+                          ),
                         ),
                       ],
                     ),
-                    const Text(
-                      'API 키는 앱 내에 암호화되어 저장됩니다. GitHub에 푸시하지 마세요.',
-                      style: TextStyle(
-                        color: Colors.grey,
-                        fontSize: 12,
-                      ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _systemInstructionController,
+                      maxLines: 3,
+                      decoration:
+                          const InputDecoration(hintText: 'System Instruction'),
                     ),
                   ],
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _systemInstructionController,
-                  maxLines: 3,
-                  decoration:
-                      const InputDecoration(hintText: 'System Instruction'),
                 ),
                 if (_errorMsg != null)
                   Text(_errorMsg!,

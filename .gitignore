@@ -5,9 +5,11 @@
 *.swp
 .DS_Store
 .atom/
+.build/
 .buildlog/
 .history
 .svn/
+.swiftpm/
 migrate_working_dir/
 
 # IntelliJ related
@@ -118,3 +120,4 @@ key.properties
 
 # Coverage
 /coverage/
+assets/gen-lang-client-0591459259-ad695edecacd.json
