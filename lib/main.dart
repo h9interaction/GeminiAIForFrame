@@ -316,11 +316,11 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       });
 
       // 사용자가 말하기 시작할 때 "AI 듣는 중..." 표시
-      await frame!
-          .sendMessage(0x0b, TxPlainText(text: 'AI Listening...').pack());
+      // await frame!
+      //     .sendMessage(0x0b, TxPlainText(text: 'AI Listening...').pack());
 
-      // AI가 응답을 시작하면 "AI 응답 중..." 메시지 표시
-      frame!.sendMessage(0x0b, TxPlainText(text: 'AI Speaking...').pack());
+      // // AI가 응답을 시작하면 "AI 응답 중..." 메시지 표시
+      // frame!.sendMessage(0x0b, TxPlainText(text: 'AI Speaking...').pack());
     } catch (e) {
       _errorMsg = 'Error executing application logic: $e';
       _log.fine(_errorMsg);

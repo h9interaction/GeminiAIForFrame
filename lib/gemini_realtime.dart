@@ -19,12 +19,12 @@ class GeminiRealtime {
 
   // 발화 상태 추적을 위한 변수
   bool _isSpeaking = false;
-  bool _isProcessingResponse = false;
+  // bool _isProcessingResponse = false;
   Timer? _interruptionProtectionTimer;
   int _interruptionCount = 0;
   static const int MAX_INTERRUPTIONS = 3;
   static const Duration INTERRUPTION_PROTECTION_TIME =
-      Duration(milliseconds: 3000); // 응답 시작 후 3초간 인터럽션 무시
+      Duration(milliseconds: 1000); // 응답 시작 후 3초간 인터럽션 무시
 
   // interestingly, 'response_modalities' seems to allow only "text", "audio", "image" - not a list. Audio only is fine for us
   // Valid voices are: Puck, Charon, Kore, Fenrir, Aoede (Set to Puck, override in connect())
@@ -95,7 +95,7 @@ class GeminiRealtime {
     // get the audio playback ready
     _audioBuffer.clear();
     _isSpeaking = false;
-    _isProcessingResponse = false;
+    // _isProcessingResponse = false;
     _interruptionCount = 0;
     _interruptionProtectionTimer?.cancel();
 
@@ -127,7 +127,7 @@ class GeminiRealtime {
     _log.info('Disconnecting from Gemini');
     _connected = false;
     _isSpeaking = false;
-    _isProcessingResponse = false;
+    // _isProcessingResponse = false;
     _interruptionProtectionTimer?.cancel();
     await _channelSubs?.cancel();
     await _channel?.sink.close();
@@ -141,11 +141,11 @@ class GeminiRealtime {
     }
 
     // 발화 중에는 오디오를 Gemini로 전송하지 않음 (하울링 방지)
-    if (_isSpeaking || _isProcessingResponse) {
-      // 디버그 용도로만 로깅하고 전송은 중단
-      _log.fine('오디오 전송 스킵: AI 응답 중');
-      return;
-    }
+    // if (_isSpeaking) {
+    //   // 디버그 용도로만 로깅하고 전송은 중단
+    //   _log.fine('오디오 전송 스킵: AI 응답 중');
+    //   return;
+    // }
 
     // base64 encode
     var base64audio = base64Encode(pcm16x16);
@@ -190,7 +190,7 @@ class GeminiRealtime {
       return (_audioBuffer.removeFirst()).buffer.asByteData();
     } else {
       // 오디오 버퍼가 비었을 때, 발화 종료로 간주할 수 있음
-      if (_isSpeaking && _audioBuffer.isEmpty) {
+      if (_audioBuffer.isEmpty) {
         _setSpeakingState(false);
       }
       return ByteData(0);
@@ -206,15 +206,15 @@ class GeminiRealtime {
       if (speaking) {
         eventLogger('AI 응답 시작');
         // 발화 시작 시 인터럽션 보호 타이머 시작
-        _isProcessingResponse = true;
+        // _isProcessingResponse = true;
         _interruptionProtectionTimer?.cancel();
         _interruptionProtectionTimer = Timer(INTERRUPTION_PROTECTION_TIME, () {
-          _isProcessingResponse = false;
+          // _isProcessingResponse = false;
           _log.info('초기 응답 보호 기간 종료');
         });
       } else {
         eventLogger('AI 응답 종료');
-        _isProcessingResponse = false;
+        // _isProcessingResponse = false;
         _interruptionProtectionTimer?.cancel();
       }
     }
@@ -240,7 +240,7 @@ class GeminiRealtime {
 
     if (audioData != null) {
       // 오디오 데이터가 있으면 발화 중으로 설정
-      if (!_isSpeaking && audioData.isNotEmpty) {
+      if (audioData.isNotEmpty) {
         _setSpeakingState(true);
       }
 
@@ -256,10 +256,10 @@ class GeminiRealtime {
       if (serverContent != null) {
         if (serverContent['interrupted'] != null) {
           // 응답 초기 단계에서는 인터럽션 이벤트 무시
-          if (_isProcessingResponse) {
-            _log.info('초기 응답 단계에서 인터럽션 이벤트 무시됨');
-            return;
-          }
+          // if (_isProcessingResponse) {
+          //   _log.info('초기 응답 단계에서 인터럽션 이벤트 무시됨');
+          //   return;
+          // }
 
           // 인터럽션 횟수 증가 및 제한 확인
           _interruptionCount++;
@@ -281,9 +281,9 @@ class GeminiRealtime {
           eventLogger('Server turn complete');
 
           // 발화 종료 처리
-          if (_isSpeaking) {
-            _setSpeakingState(false);
-          }
+          // if (_isSpeaking) {
+          //   _setSpeakingState(false);
+          // }
         } else {
           eventLogger(serverContent);
         }

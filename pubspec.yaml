@@ -45,9 +45,9 @@ flutter_icons:
   image_path_android: "assets/icon.png"
 
 flutter_native_splash:
-  color: "#000000FF" # 배경색
-  # image: assets/splash/splash_icon.png # 스플래시 로고
-  # branding: assets/splash/branding.png # (선택) 하단 브랜드 이미지
+  color: "#000000"
+  image: assets/splash.png
   android: true
-  ios: false # iOS도 설정할 경우 true
+  ios: true
+  # branding: assets/splash/branding.png # (선택) 하단 브랜드 이미지
   fullscreen: true
