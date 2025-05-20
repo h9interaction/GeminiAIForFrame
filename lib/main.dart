@@ -105,6 +105,8 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   static const _debugTextStyle =
       TextStyle(fontSize: 14, fontFamily: 'monospace');
 
+  bool _isTapProcessing = false;
+
   MainAppState() {
     // filter logging
     hierarchicalLoggingEnabled = true;
@@ -289,30 +291,21 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       // listen for double taps to start/stop transcribing
       _tapSubs?.cancel();
       _tapSubs = RxTap().attach(frame!.dataResponse).listen((taps) async {
-        _log.info('taps: $taps');
+        if (_isTapProcessing) return;
+        _isTapProcessing = true;
+
         if (_gemini.isConnected()) {
           if (taps >= 2) {
             if (!_streaming) {
               await _startFrameStreaming();
             } else {
               await _stopFrameStreaming();
-
-              // prompt the user to begin tapping
               await frame!.sendMessage(
                   0x0b, TxPlainText(text: 'Double tap to resume!').pack());
             }
           }
-          // ignore spurious 1-taps
-        } else {
-          // Disconnected from Gemini, go back to Ready state
-          _appendEvent('Disconnected from Gemini');
-
-          _stopFrameStreaming();
-
-          setState(() {
-            currentState = ApplicationState.ready;
-          });
         }
+        _isTapProcessing = false;
       });
 
       // 사용자가 말하기 시작할 때 "AI 듣는 중..." 표시
