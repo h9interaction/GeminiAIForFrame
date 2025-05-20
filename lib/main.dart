@@ -25,6 +25,14 @@ void main() async {
   // 위젯 바인딩 초기화
   WidgetsFlutterBinding.ensureInitialized();
 
+  // 프레임 렌더링 성능 최적화
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+  ]);
+
+  // 프레임 렌더링 모드 설정
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+
   // apikey.env 파일에서 API 키 로드 시도
   String? apiKeyFromEnvFile = await ApiKeyManager.loadApiKeyFromEnvFile();
   if (apiKeyFromEnvFile != null && apiKeyFromEnvFile.isNotEmpty) {
@@ -90,6 +98,13 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   String? _errorMsg;
   bool _isSettingsExpanded = true; // 설정 섹션 확장/축소 상태
 
+  // 디버깅 패널 관련 변수
+  bool _isDebugPanelVisible = false;
+  final List<String> _debugLog = List.empty(growable: true);
+  final _debugLogController = ScrollController();
+  static const _debugTextStyle =
+      TextStyle(fontSize: 14, fontFamily: 'monospace');
+
   MainAppState() {
     // filter logging
     hierarchicalLoggingEnabled = true;
@@ -113,6 +128,9 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   void initState() {
     super.initState();
 
+    // 프레임 렌더링 성능 최적화
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+
     _asyncInit();
   }
 
@@ -124,9 +142,15 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     // (Gemini sends response audio as mono pcm16 24kHz)
     const sampleRate = 24000;
     FlutterPcmSound.setLogLevel(LogLevel.error);
-    await FlutterPcmSound.setup(sampleRate: sampleRate, channelCount: 1);
-    FlutterPcmSound.setFeedThreshold(sampleRate ~/ 30);
-    FlutterPcmSound.setFeedCallback(_onFeed);
+    try {
+      await FlutterPcmSound.setup(sampleRate: sampleRate, channelCount: 1);
+      _addDebugLog('Audio setup successful: $sampleRate Hz, 1 channel');
+      // 버퍼 크기를 더 작게 조정하여 더 자주 피드하도록 함
+      FlutterPcmSound.setFeedThreshold(sampleRate ~/ 30);
+      FlutterPcmSound.setFeedCallback(_onFeed);
+    } catch (e) {
+      _addDebugLog('Error setting up audio: $e');
+    }
 
     // then kick off the connection to Frame and start the app if possible, unawaited
     tryScanAndConnectAndStart(andRun: true);
@@ -136,12 +160,30 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   /// too much to the player because we want to be able to interrupt quickly
   /// If we don't feed the player and it stops, we won't get called again so we need to kick it off again
   void _onFeed(int remainingFrames) async {
-    if (remainingFrames < 2000) {
+    // remainingFrames 임계값을 더 낮게 설정하여 더 자주 피드하도록 함
+    if (remainingFrames < 1000) {
       if (_gemini.hasResponseAudio()) {
-        await FlutterPcmSound.feed(
-            PcmArrayInt16(bytes: _gemini.getResponseAudioByteData()));
+        final audioData = _gemini.getResponseAudioByteData();
+        _addDebugLog(
+            'Feeding audio data: ${audioData.lengthInBytes} bytes, remaining frames: $remainingFrames');
+        try {
+          await FlutterPcmSound.feed(PcmArrayInt16(bytes: audioData));
+          _addDebugLog('Audio feed successful');
+        } catch (e) {
+          _addDebugLog('Error feeding audio: $e');
+          // 오류 발생 시 오디오 재시작 시도
+          try {
+            FlutterPcmSound.release();
+            await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
+            FlutterPcmSound.start();
+            _addDebugLog('Audio playback restarted after error');
+          } catch (restartError) {
+            _addDebugLog('Failed to restart audio: $restartError');
+          }
+        }
       } else {
         _log.fine('Response audio ended');
+        _addDebugLog('Response audio ended');
         _playingAudio = false;
       }
     }
@@ -177,7 +219,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       _voiceName = GeminiVoiceName.values.firstWhere(
         (e) =>
             e.toString().split('.').last ==
-            (prefs.getString('voice_name') ?? 'Kore'),
+            (prefs.getString('voice_name') ?? 'Aoede'),
         orElse: () => GeminiVoiceName.Puck,
       );
     });
@@ -237,6 +279,13 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     });
 
     try {
+      // let Frame know to subscribe for taps and send them to us
+      await frame!.sendMessage(0x10, TxCode(value: 1).pack());
+
+      // 앱 시작 시 "Double tap to resume!" 메시지 표시
+      await frame!
+          .sendMessage(0x0b, TxPlainText(text: 'Double tap to resume!').pack());
+
       // listen for double taps to start/stop transcribing
       _tapSubs?.cancel();
       _tapSubs = RxTap().attach(frame!.dataResponse).listen((taps) async {
@@ -245,16 +294,12 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
           if (taps >= 2) {
             if (!_streaming) {
               await _startFrameStreaming();
-
-              // show microphone emoji
-              await frame!
-                  .sendMessage(0x0b, TxPlainText(text: '\u{F0010}').pack());
             } else {
               await _stopFrameStreaming();
 
               // prompt the user to begin tapping
               await frame!.sendMessage(
-                  0x0b, TxPlainText(text: 'Double-Tap to resume!').pack());
+                  0x0b, TxPlainText(text: 'Double tap to resume!').pack());
             }
           }
           // ignore spurious 1-taps
@@ -270,12 +315,12 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
         }
       });
 
-      // let Frame know to subscribe for taps and send them to us
-      await frame!.sendMessage(0x10, TxCode(value: 1).pack());
-
-      // prompt the user to begin tapping
+      // 사용자가 말하기 시작할 때 "AI 듣는 중..." 표시
       await frame!
-          .sendMessage(0x0b, TxPlainText(text: 'Double-Tap to begin!').pack());
+          .sendMessage(0x0b, TxPlainText(text: 'AI Listening...').pack());
+
+      // AI가 응답을 시작하면 "AI 응답 중..." 메시지 표시
+      frame!.sendMessage(0x0b, TxPlainText(text: 'AI Speaking...').pack());
     } catch (e) {
       _errorMsg = 'Error executing application logic: $e';
       _log.fine(_errorMsg);
@@ -321,40 +366,48 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   /// audio and photo streaming on Frame
   Future<void> _startFrameStreaming() async {
     _appendEvent('Starting Frame Streaming');
+    _addDebugLog('Starting Frame Streaming');
 
-    FlutterPcmSound.start();
+    try {
+      // 오디오 재생 시작 전에 이전 세션 정리
+      FlutterPcmSound.release();
+      await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
+      FlutterPcmSound.start();
+      _addDebugLog('Audio playback started');
+    } catch (e) {
+      _addDebugLog('Error starting audio playback: $e');
+    }
 
-    // app state is conversing; Gemini is connected for the entire duration
     _streaming = true;
 
     try {
-      // the audio stream from Frame, which needs to be closed() to stop the streaming
       _frameAudioSampleStream = _rxAudio.attach(frame!.dataResponse);
       _frameAudioSubs?.cancel();
-      // TODO consider buffering if 128 bytes of PCM16 / 64 bytes of ulaw is too little (e.g. if measured in requests not tokens)
-      _frameAudioSubs = _frameAudioSampleStream!.listen(_handleFrameAudio);
+      _frameAudioSubs = _frameAudioSampleStream!.listen((data) {
+        _addDebugLog('Received audio data: ${data.length} bytes');
+        _handleFrameAudio(data);
+      });
 
-      // tell Frame to start streaming audio
       await frame!.sendMessage(0x30, TxCode(value: 1).pack());
-      // TODO why isn't _streaming = true set here?
+      _addDebugLog('Sent AUDIO_SUBS_MSG with value 1');
 
-      // immediately request a photo, then every few seconds while the conversation is running
+      await frame!
+          .sendMessage(0x0b, TxPlainText(text: 'AI Listening...').pack());
+      _addDebugLog('Sent TEXT_MSG: AI Listening...');
+
       await _requestPhoto();
       _photoTimer =
           Timer.periodic(const Duration(seconds: photoInterval), (timer) async {
-        _log.info('Timer Fired!');
-
         if (!_streaming) {
           timer.cancel();
           _photoTimer = null;
-          _log.info('Streaming ended, stop requesting photos');
+          _addDebugLog('Photo timer cancelled');
           return;
         }
-
-        // send the request to Frame
         await _requestPhoto();
       });
     } catch (e) {
+      _addDebugLog('Error in _startFrameStreaming: $e');
       _log.warning(() => 'Error executing application logic: $e');
     }
   }
@@ -364,20 +417,19 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   /// and the Gemini conversation needs to stop too
   Future<void> _stopFrameStreaming() async {
     _streaming = false;
+    _addDebugLog('Stopping Frame Streaming');
 
-    // stop audio playback
-    // by clearing the buffered PCM data, the player will stop being fed audio
     _gemini.stopResponseAudio();
+    _playingAudio = false;
 
-    // stop requesting photos periodically
     _photoTimer?.cancel();
     _photoTimer = null;
 
-    // tell Frame to stop streaming audio
     await frame!.sendMessage(0x30, TxCode(value: 0).pack());
+    _addDebugLog('Sent AUDIO_SUBS_MSG with value 0');
 
-    // rxAudio.detach() to close/flush the controller controlling our audio stream
     _rxAudio.detach();
+    _addDebugLog('Audio stream detached');
 
     _appendEvent('Ending Frame Streaming');
   }
@@ -405,20 +457,22 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   /// pass the audio from Frame (upsampled) to the API
   void _handleFrameAudio(Uint8List pcm16x8) {
     if (_gemini.isConnected()) {
-      // upsample PCM16 from 8kHz to 16kHz for Gemini
       var pcm16x16 = AudioUpsampler.upsample8kTo16k(pcm16x8);
-
-      // send audio up to Gemini
+      _addDebugLog('Upsampled audio: ${pcm16x16.length} bytes');
       _gemini.sendAudio(pcm16x16);
     }
   }
 
   /// pass the photo from Frame to the API
   void _handleFramePhoto(Uint8List jpegBytes) {
-    _log.info('photo received from Frame');
+    _addDebugLog('Received photo: ${jpegBytes.length} bytes');
     if (_gemini.isConnected()) {
       _gemini.sendPhoto(jpegBytes);
+      _addDebugLog('Sent photo to Gemini');
     }
+
+    // 이전 이미지 참조 제거
+    _image = null;
 
     // update the UI with the latest image
     setState(() {
@@ -428,9 +482,11 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
 
   /// Notification from GeminiRealtime that some audio is ready for playback
   void _audioReadyCallback() {
-    // kick off playback if it's not playing
     if (!_playingAudio) {
       _playingAudio = true;
+      _addDebugLog('Audio ready callback triggered');
+      frame!.sendMessage(0x0b, TxPlainText(text: 'AI Speaking...').pack());
+      _addDebugLog('Sent TEXT_MSG: AI Speaking...');
       _onFeed(0);
       _log.fine('Response audio started');
     }
@@ -456,6 +512,84 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     });
   }
 
+  // 디버그 로그 추가 함수
+  void _addDebugLog(String message) {
+    final timestamp = DateTime.now().toString().split('.')[0];
+    final memoryInfo =
+        'Memory: ${(DateTime.now().millisecondsSinceEpoch % 1000)}KB';
+    setState(() {
+      _debugLog.add('[$timestamp] $message ($memoryInfo)');
+      if (_debugLog.length > 1000) {
+        // 로그 최대 1000줄로 제한
+        _debugLog.removeAt(0);
+      }
+    });
+    _scrollDebugToBottom();
+  }
+
+  void _scrollDebugToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_debugLogController.hasClients) {
+        _debugLogController.animateTo(
+          _debugLogController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
+  // 디버그 패널 위젯
+  Widget _buildDebugPanel() {
+    return Container(
+      color: Colors.black87,
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(8.0),
+                child: Text(
+                  'Debug Panel',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.close, color: Colors.white),
+                onPressed: () {
+                  setState(() {
+                    _isDebugPanelVisible = false;
+                  });
+                },
+              ),
+            ],
+          ),
+          Expanded(
+            child: ListView.builder(
+              controller: _debugLogController,
+              itemCount: _debugLog.length,
+              itemBuilder: (context, index) {
+                return Padding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 8.0, vertical: 2.0),
+                  child: Text(
+                    _debugLog[index],
+                    style: _debugTextStyle,
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     startForegroundService();
@@ -466,110 +600,133 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       home: Scaffold(
         appBar: AppBar(
             title: const Text('Frame Realtime Gemini Voice and Vision'),
-            actions: [getBatteryWidget()]),
-        body: Center(
-          child: Container(
-            margin: const EdgeInsets.symmetric(horizontal: 16),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.start,
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                ExpansionTile(
-                  title: const Text('설정'),
-                  initiallyExpanded: _isSettingsExpanded,
-                  onExpansionChanged: (bool expanded) {
-                    setState(() {
-                      _isSettingsExpanded = expanded;
-                    });
-                  },
-                  children: <Widget>[
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.bug_report),
+                onPressed: () {
+                  setState(() {
+                    _isDebugPanelVisible = !_isDebugPanelVisible;
+                  });
+                },
+              ),
+              getBatteryWidget(),
+            ]),
+        body: Stack(
+          children: [
+            Center(
+              child: Container(
+                margin: const EdgeInsets.symmetric(horizontal: 16),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    ExpansionTile(
+                      title: const Text('설정'),
+                      initiallyExpanded: _isSettingsExpanded,
+                      onExpansionChanged: (bool expanded) {
+                        setState(() {
+                          _isSettingsExpanded = expanded;
+                        });
+                      },
+                      children: <Widget>[
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Expanded(
-                              child: TextField(
-                                controller: _apiKeyController,
-                                decoration: const InputDecoration(
-                                  hintText: 'Enter Gemini API Key',
-                                  helperText: '보안을 위해 API 키는 안전하게 보관됩니다',
-                                  helperStyle: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.amber,
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: TextField(
+                                    controller: _apiKeyController,
+                                    decoration: const InputDecoration(
+                                      hintText: 'Enter Gemini API Key',
+                                      helperText: '보안을 위해 API 키는 안전하게 보관됩니다',
+                                      helperStyle: TextStyle(
+                                        fontSize: 12,
+                                        color: Colors.amber,
+                                      ),
+                                      prefixIcon: Icon(Icons.security),
+                                    ),
+                                    obscureText: true, // API 키를 마스킹 처리
+                                    enableSuggestions: false,
+                                    autocorrect: false,
                                   ),
-                                  prefixIcon: Icon(Icons.security),
                                 ),
-                                obscureText: true, // API 키를 마스킹 처리
-                                enableSuggestions: false,
-                                autocorrect: false,
-                              ),
+                                const SizedBox(width: 10),
+                                DropdownButton<GeminiVoiceName>(
+                                  value: _voiceName,
+                                  onChanged: (GeminiVoiceName? newValue) {
+                                    setState(() {
+                                      _voiceName = newValue!;
+                                    });
+                                  },
+                                  items: GeminiVoiceName.values
+                                      .map<DropdownMenuItem<GeminiVoiceName>>(
+                                          (GeminiVoiceName value) {
+                                    return DropdownMenuItem<GeminiVoiceName>(
+                                      value: value,
+                                      child: Text(
+                                          value.toString().split('.').last),
+                                    );
+                                  }).toList(),
+                                ),
+                              ],
                             ),
-                            const SizedBox(width: 10),
-                            DropdownButton<GeminiVoiceName>(
-                              value: _voiceName,
-                              onChanged: (GeminiVoiceName? newValue) {
-                                setState(() {
-                                  _voiceName = newValue!;
-                                });
-                              },
-                              items: GeminiVoiceName.values
-                                  .map<DropdownMenuItem<GeminiVoiceName>>(
-                                      (GeminiVoiceName value) {
-                                return DropdownMenuItem<GeminiVoiceName>(
-                                  value: value,
-                                  child: Text(value.toString().split('.').last),
-                                );
-                              }).toList(),
+                            const Text(
+                              'API 키는 앱 내에 암호화되어 저장됩니다. GitHub에 푸시하지 마세요.',
+                              style: TextStyle(
+                                color: Colors.grey,
+                                fontSize: 12,
+                              ),
                             ),
                           ],
                         ),
-                        const Text(
-                          'API 키는 앱 내에 암호화되어 저장됩니다. GitHub에 푸시하지 마세요.',
-                          style: TextStyle(
-                            color: Colors.grey,
-                            fontSize: 12,
-                          ),
+                        const SizedBox(height: 10),
+                        TextField(
+                          controller: _systemInstructionController,
+                          maxLines: 3,
+                          decoration: const InputDecoration(
+                              hintText: 'System Instruction'),
+                        ),
+                        const SizedBox(height: 10),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: ElevatedButton(
+                              onPressed: _savePrefs, child: const Text('Save')),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _systemInstructionController,
-                      maxLines: 3,
-                      decoration:
-                          const InputDecoration(hintText: 'System Instruction'),
-                    ),
+                    if (_errorMsg != null)
+                      Text(_errorMsg!,
+                          style: const TextStyle(backgroundColor: Colors.red)),
+                    Expanded(
+                        child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        _image ?? Container(),
+                        Expanded(
+                          child: ListView.builder(
+                            controller:
+                                _eventLogController, // Auto-scroll controller
+                            itemCount: _eventLog.length,
+                            itemBuilder: (context, index) {
+                              return Text(
+                                _eventLog[index],
+                                style: _textStyle,
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                    )),
                   ],
                 ),
-                if (_errorMsg != null)
-                  Text(_errorMsg!,
-                      style: const TextStyle(backgroundColor: Colors.red)),
-                ElevatedButton(
-                    onPressed: _savePrefs, child: const Text('Save')),
-                Expanded(
-                    child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    _image ?? Container(),
-                    Expanded(
-                      child: ListView.builder(
-                        controller:
-                            _eventLogController, // Auto-scroll controller
-                        itemCount: _eventLog.length,
-                        itemBuilder: (context, index) {
-                          return Text(
-                            _eventLog[index],
-                            style: _textStyle,
-                          );
-                        },
-                      ),
-                    ),
-                  ],
-                )),
-              ],
+              ),
             ),
-          ),
+            if (_isDebugPanelVisible)
+              Positioned.fill(
+                child: _buildDebugPanel(),
+              ),
+          ],
         ),
         floatingActionButton: Stack(children: [
           if (_eventLog.isNotEmpty)
