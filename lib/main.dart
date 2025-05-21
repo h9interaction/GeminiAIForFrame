@@ -9,6 +9,9 @@ import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import 'package:frame_realtime_gemini_voicevision/api_key_manager.dart';
 import 'package:frame_realtime_gemini_voicevision/audio_upsampler.dart';
 import 'package:frame_realtime_gemini_voicevision/gemini_realtime.dart';
+import 'package:frame_realtime_gemini_voicevision/device/device_factory.dart';
+import 'package:frame_realtime_gemini_voicevision/device/device_interface.dart';
+import 'package:frame_realtime_gemini_voicevision/device/mobile_device.dart';
 import 'package:logging/logging.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:frame_msg/rx/audio.dart';
@@ -66,7 +69,13 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   /// realtime voice application members
   late final GeminiRealtime _gemini;
   GeminiVoiceName _voiceName = GeminiVoiceName.Puck;
-  bool _isFrameConnected = false; // Frame 글래스 연결 상태
+  bool _isFrameConnected = false;
+
+  // 디바이스 관련 변수
+  DeviceInterface? _device;
+  StreamSubscription? _deviceAudioSubs;
+  StreamSubscription? _devicePhotoSubs;
+  StreamSubscription? _deviceStateSubs;
 
   // status of audio output with FlutterPCMSound
   bool _playingAudio = false;
@@ -181,12 +190,160 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       _addDebugLog('Error setting up audio: $e');
     }
 
-    // then kick off the connection to Frame and start the app if possible, unawaited
-    tryScanAndConnectAndStart(andRun: true);
+    await _initializeDevice();
 
     if (_apiKeyController.text.isNotEmpty) {
       run();
     }
+  }
+
+  Future<void> _initializeDevice() async {
+    try {
+      _addDebugLog('Frame 글래스 연결 시도 중...');
+
+      // Frame 글래스 연결 시도
+      bool frameConnected = await tryScanAndConnect();
+
+      if (frameConnected) {
+        _addDebugLog('Frame 글래스 연결 성공');
+        _device = DeviceFactory.createDevice(this);
+      } else {
+        _addDebugLog('Frame 글래스를 찾을 수 없어 모바일 디바이스로 전환합니다.');
+        _device = DeviceFactory.createDevice(null);
+      }
+
+      await _device!.initialize();
+      _isFrameConnected = _device!.currentState.type == DeviceType.frame;
+
+      setState(() {
+        currentState = ApplicationState.ready;
+      });
+
+      _addDebugLog('${_isFrameConnected ? "Frame 글래스" : "모바일 디바이스"} 초기화 완료');
+    } catch (e) {
+      _addDebugLog('디바이스 초기화 중 오류 발생: $e');
+      // 오류 발생 시 모바일 디바이스로 폴백
+      if (_device == null || _device!.currentState.type == DeviceType.frame) {
+        _addDebugLog('모바일 디바이스로 전환 시도...');
+        _device = DeviceFactory.createDevice(null);
+        await _device!.initialize();
+        _isFrameConnected = false;
+        setState(() {
+          currentState = ApplicationState.ready;
+        });
+        _addDebugLog('모바일 디바이스로 전환 완료');
+      }
+    }
+  }
+
+  Future<bool> tryScanAndConnect() async {
+    try {
+      if (await fbp.FlutterBluePlus.isSupported == false) {
+        _addDebugLog('Bluetooth is not supported on this device');
+        return false;
+      }
+
+      // 블루투스 상태 확인
+      if (await fbp.FlutterBluePlus.adapterState.first ==
+          fbp.BluetoothAdapterState.off) {
+        _addDebugLog('Bluetooth is turned off');
+        return false;
+      }
+
+      _addDebugLog('Frame 글래스 스캔 시작...');
+
+      // 이전 스캔 중지
+      await fbp.FlutterBluePlus.stopScan();
+
+      // 스캔 시작
+      bool deviceFound = false;
+      final completer = Completer<bool>();
+
+      final subscription = fbp.FlutterBluePlus.scanResults.listen((results) {
+        for (final r in results) {
+          if (r.device.platformName.startsWith('Frame')) {
+            deviceFound = true;
+            fbp.FlutterBluePlus.stopScan();
+            _addDebugLog('Frame 글래스 발견: ${r.device.platformName}');
+            r.device.connect().then((_) {
+              _addDebugLog('Frame 글래스 연결됨');
+              completer.complete(true);
+            }).catchError((e) {
+              _addDebugLog('Frame 글래스 연결 실패: $e');
+              completer.complete(false);
+            });
+            break;
+          }
+        }
+      });
+
+      // 스캔 시작
+      await fbp.FlutterBluePlus.startScan(
+        timeout: const Duration(seconds: 5),
+        androidUsesFineLocation: false,
+      );
+
+      // 5초 후에도 발견되지 않으면 false 반환
+      Timer(const Duration(seconds: 5), () {
+        if (!deviceFound && !completer.isCompleted) {
+          _addDebugLog('Frame 글래스를 찾을 수 없음');
+          completer.complete(false);
+        }
+      });
+
+      final result = await completer.future;
+      subscription.cancel();
+      return result;
+    } catch (e) {
+      _addDebugLog('Frame 글래스 스캔/연결 중 오류 발생: $e');
+      return false;
+    }
+  }
+
+  Future<void> _resetApp() async {
+    setState(() {
+      _eventLog.clear();
+    });
+    _addDebugLog('앱 초기화 시작: 모든 연결 리셋');
+
+    // 1. 기존 연결 및 상태 리셋
+    _streaming = false;
+    _playingAudio = false;
+
+    // 오디오 관련 리소스 정리
+    await FlutterPcmSound.release();
+    _frameAudioSubs?.cancel();
+    _photoTimer?.cancel();
+    _photoTimer = null;
+
+    // Frame 연결 관련 정리
+    if (_isFrameConnected && frame != null) {
+      _tapSubs?.cancel();
+      await frame!.sendMessage(0x30, TxCode(value: 0).pack()); // 오디오 스트리밍 중지
+      await frame!.sendMessage(0x10, TxCode(value: 0).pack()); // 탭 이벤트 중지
+      await frame!
+          .sendMessage(0x0b, TxPlainText(text: ' ').pack()); // 디스플레이 클리어
+      _rxAudio.detach();
+    }
+
+    // Gemini 연결 해제
+    await _gemini.disconnect();
+
+    _addDebugLog('모든 연결 리셋 완료');
+
+    // 2. 상태 초기화
+    setState(() {
+      currentState = ApplicationState.ready;
+      _image = null;
+    });
+
+    // 3. 디바이스 재초기화
+    await _initializeDevice();
+
+    // 4. run() 함수 실행하여 새로 시작
+    _addDebugLog('앱 재시작 시도');
+    await run();
+    _appendEvent('앱이 완전히 초기화되고 새로 시작되었습니다.');
   }
 
   /// Feed the audio player with samples if we have some more, but don't send
@@ -214,6 +371,10 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   Future<void> dispose() async {
     await _gemini.disconnect();
     await _frameAudioSubs?.cancel();
+    await _deviceAudioSubs?.cancel();
+    await _devicePhotoSubs?.cancel();
+    await _deviceStateSubs?.cancel();
+    await _device?.dispose();
     await FlutterPcmSound.release();
     _photoTimer?.cancel();
     _textInputController.dispose();
@@ -289,18 +450,16 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       return;
     }
 
-    // Frame 글래스 연결 상태 확인
-    _isFrameConnected = frame != null;
-    _addDebugLog('Frame 글래스 연결 상태: ${_isFrameConnected ? "연결됨" : "연결되지 않음"}');
-
-    // Frame 글래스가 연결되지 않은 경우 텍스트 전용 모드로 설정
-    if (!_isFrameConnected) {
-      _gemini.setMode(GeminiMode.textOnly);
-      _appendEvent('Frame 글래스가 연결되지 않아 텍스트 전용 모드로 실행됩니다.');
-      _addDebugLog('텍스트 전용 모드로 설정됨');
-    }
-
     try {
+      // 디바이스 초기화
+      _device = DeviceFactory.createDevice(frame != null ? this : null);
+      await _device!.initialize();
+
+      // Frame 글래스 연결 상태 확인
+      _isFrameConnected = _device!.currentState.type == DeviceType.frame;
+      _addDebugLog(
+          '디바이스 타입: ${_device!.currentState.type == DeviceType.frame ? "Frame 글래스" : "모바일"}');
+
       // connect to Gemini realtime
       _addDebugLog('Gemini 연결 시도...');
       await _gemini.connect(_apiKeyController.text, _voiceName,
@@ -317,43 +476,26 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
         currentState = ApplicationState.running;
       });
 
-      if (_isFrameConnected) {
-        // Frame 글래스가 연결된 경우에만 기존 로직 실행
-        _addDebugLog('Frame 글래스 기능 초기화 시작');
-        await frame!.sendMessage(0x10, TxCode(value: 1).pack());
-        await frame!.sendMessage(
-            0x0b, TxPlainText(text: 'Double tap to resume!').pack());
-
-        _tapSubs?.cancel();
-        _tapSubs = RxTap().attach(frame!.dataResponse).listen((taps) async {
-          if (_isTapProcessing) return;
-          _isTapProcessing = true;
-
-          if (_gemini.isConnected()) {
-            if (taps >= 2) {
-              if (!_streaming) {
-                await _startFrameStreaming();
-              } else {
-                await _stopFrameStreaming();
-                await frame!.sendMessage(
-                    0x0b, TxPlainText(text: 'Double tap to resume!').pack());
-              }
-            }
-          }
-          _isTapProcessing = false;
+      // 디바이스 스트림 구독
+      _deviceAudioSubs = _device!.audioStream.listen(_handleAudioData);
+      _devicePhotoSubs = _device!.photoStream.listen(_handlePhotoData);
+      _deviceStateSubs = _device!.stateStream.listen((state) {
+        setState(() {
+          _playingAudio = state.isAudioPlaying;
         });
-        _addDebugLog('Frame 글래스 기능 초기화 완료');
-        // 앱 초기화 후 자동으로 더블탭 이벤트 트리거 (라이브 스트림 자동 시작)
-        Future.delayed(const Duration(milliseconds: 500), () async {
-          if (_gemini.isConnected() && !_streaming) {
-            _addDebugLog('자동 더블탭 트리거: 라이브 스트림 시작');
-            await _startFrameStreaming();
-          }
-        });
-      } else {
-        _addDebugLog('Frame 글래스가 연결되지 않아 텍스트 전용 모드로 실행됩니다.');
-        _appendEvent('텍스트 입력을 시작할 수 있습니다.');
-      }
+      });
+
+      // 오디오 스트림 시작
+      await _device!.startAudioStream();
+
+      // 사진 캡처 시작 (디바이스 타입에 따라 다른 주기 설정)
+      final captureInterval = _device!.currentState.type == DeviceType.frame
+          ? const Duration(seconds: 3)
+          : const Duration(milliseconds: 500);
+      await _device!.startPhotoCapture(captureInterval);
+
+      _appendEvent(
+          '${_isFrameConnected ? "Frame 글래스" : "모바일 카메라/마이크"}를 사용하여 실행됩니다.');
     } catch (e) {
       _errorMsg = 'Error executing application logic: $e';
       _log.fine(_errorMsg);
@@ -373,22 +515,16 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       currentState = ApplicationState.canceling;
     });
 
-    // cancel the subscription for taps
-    _tapSubs?.cancel();
+    // 디바이스 스트림 중지
+    await _device?.stopAudioStream();
+    await _device?.stopPhotoCapture();
 
-    // cancel the conversation if it's running
-    if (_streaming) _stopFrameStreaming();
+    // 스트림 구독 취소
+    await _deviceAudioSubs?.cancel();
+    await _devicePhotoSubs?.cancel();
+    await _deviceStateSubs?.cancel();
 
-    // tell the Frame to stop streaming audio (regardless of if we are currently)
-    await frame!.sendMessage(0x30, TxCode(value: 0).pack());
-
-    // let Frame know to stop sending taps too
-    await frame!.sendMessage(0x10, TxCode(value: 0).pack());
-
-    // clear the display
-    await frame!.sendMessage(0x0b, TxPlainText(text: ' ').pack());
-
-    // disconnect from Gemini
+    // Gemini 연결 해제
     await _gemini.disconnect();
 
     setState(() {
@@ -577,6 +713,25 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     });
   }
 
+  Future<void> _handleAudioData(Uint8List data) async {
+    try {
+      _gemini.sendAudio(data);
+    } catch (e) {
+      _addDebugLog('오디오 데이터 처리 중 오류 발생: $e');
+    }
+  }
+
+  Future<void> _handlePhotoData(Uint8List data) async {
+    try {
+      _gemini.sendPhoto(data);
+      setState(() {
+        _image = Image.memory(data);
+      });
+    } catch (e) {
+      _addDebugLog('사진 데이터 처리 중 오류 발생: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     startForegroundService();
@@ -657,16 +812,39 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          GestureDetector(
-                            onDoubleTap: () {
-                              setState(() {
-                                if (_image != null) {
-                                  _isImageFullscreen = true;
+                          if (_device?.currentState.type == DeviceType.mobile)
+                            // 모바일 디바이스일 때 실시간 카메라 프리뷰 표시
+                            StreamBuilder<Widget>(
+                              stream: (_device as MobileDevice).previewStream,
+                              builder: (context, snapshot) {
+                                if (snapshot.hasData) {
+                                  return AspectRatio(
+                                    aspectRatio: 3 / 4,
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        border: Border.all(
+                                          color: Colors.blue,
+                                          width: 2,
+                                        ),
+                                      ),
+                                      child: snapshot.data!,
+                                    ),
+                                  );
                                 }
-                              });
-                            },
-                            child: _image ?? Container(),
-                          ),
+                                return Container();
+                              },
+                            )
+                          else
+                            GestureDetector(
+                              onDoubleTap: () {
+                                setState(() {
+                                  if (_image != null) {
+                                    _isImageFullscreen = true;
+                                  }
+                                });
+                              },
+                              child: _image ?? Container(),
+                            ),
                           Expanded(
                             child: ListView.builder(
                               controller:
