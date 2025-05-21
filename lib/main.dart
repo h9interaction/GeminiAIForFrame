@@ -10,7 +10,6 @@ import 'package:frame_realtime_gemini_voicevision/api_key_manager.dart';
 import 'package:frame_realtime_gemini_voicevision/audio_upsampler.dart';
 import 'package:frame_realtime_gemini_voicevision/gemini_realtime.dart';
 import 'package:logging/logging.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:frame_msg/rx/audio.dart';
 import 'package:frame_msg/rx/photo.dart';
@@ -20,6 +19,11 @@ import 'package:frame_msg/tx/code.dart';
 import 'package:frame_msg/tx/plain_text.dart';
 import 'package:simple_frame_app/simple_frame_app.dart';
 import 'foreground_service.dart';
+import 'package:frame_realtime_gemini_voicevision/settings_panel.dart';
+import 'package:frame_realtime_gemini_voicevision/debug_panel.dart';
+import 'package:frame_realtime_gemini_voicevision/app_bar_panel.dart';
+import 'package:frame_realtime_gemini_voicevision/text_input_panel.dart';
+import 'package:frame_realtime_gemini_voicevision/floating_button_panel.dart';
 
 void main() async {
   // 위젯 바인딩 초기화
@@ -96,7 +100,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   final _textInputController = TextEditingController();
   final List<String> _eventLog = List.empty(growable: true);
   final _eventLogController = ScrollController();
-  static const _textStyle = TextStyle(fontSize: 20);
+  static const _textStyle = TextStyle(fontSize: 12);
   String? _errorMsg;
   bool _isSettingsPanelVisible = false;
 
@@ -114,9 +118,9 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
 
   final Map<int, String> buttonTexts = {
     1: "이거 치워줘.",
-    2: "용과 상태 어때?",
-    3: "용과 어디에 보관해?",
-    4: "감사합니다"
+    2: "아보카도 상태 어때?",
+    3: "아보카도 어디에 보관해?",
+    4: "오늘 날씨 어때?"
   };
 
   MainAppState() {
@@ -573,168 +577,195 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     });
   }
 
-  // 디버그 패널 위젯
-  Widget _buildDebugPanel() {
-    return Container(
-      color: Colors.black87,
-      child: Column(
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Padding(
-                padding: EdgeInsets.all(8.0),
-                child: Text(
-                  'Debug Panel',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.close, color: Colors.white),
-                onPressed: () {
-                  setState(() {
-                    _isDebugPanelVisible = false;
-                  });
-                },
-              ),
-            ],
-          ),
-          Expanded(
-            child: ListView.builder(
-              controller: _debugLogController,
-              itemCount: _debugLog.length,
-              itemBuilder: (context, index) {
-                return Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 8.0, vertical: 2.0),
-                  child: Text(
-                    _debugLog[index],
-                    style: _debugTextStyle,
-                  ),
-                );
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  @override
+  Widget build(BuildContext context) {
+    startForegroundService();
+    return WithForegroundTask(
+        child: MaterialApp(
+      title: 'AI Home Agent',
+      theme: ThemeData.dark(),
+      home: Scaffold(
+        appBar: CustomAppBar(
+          title: 'AI Home Agent',
+          onBugReportPressed: () {
+            setState(() {
+              _isDebugPanelVisible = !_isDebugPanelVisible;
+            });
+          },
+          onSettingsPressed: () {
+            setState(() {
+              _isSettingsPanelVisible = !_isSettingsPanelVisible;
+            });
+          },
+          onRefreshPressed: () async {
+            setState(() {
+              _eventLog.clear();
+            });
+            _addDebugLog('앱 초기화 시작: 모든 연결 리셋');
 
-  // 설정 패널 위젯 추가 (하단에 버튼 고정)
-  Widget _buildSettingsPanel() {
-    return Container(
-      color: Colors.black87.withOpacity(0.95),
-      child: SafeArea(
-        child: Column(
+            // 1. 기존 연결 및 상태 리셋
+            _streaming = false;
+            _playingAudio = false;
+
+            // 오디오 관련 리소스 정리
+            await FlutterPcmSound.release();
+            _frameAudioSubs?.cancel();
+            _photoTimer?.cancel();
+            _photoTimer = null;
+
+            // Frame 연결 관련 정리
+            if (_isFrameConnected && frame != null) {
+              _tapSubs?.cancel();
+              await frame!
+                  .sendMessage(0x30, TxCode(value: 0).pack()); // 오디오 스트리밍 중지
+              await frame!
+                  .sendMessage(0x10, TxCode(value: 0).pack()); // 탭 이벤트 중지
+              await frame!.sendMessage(
+                  0x0b, TxPlainText(text: ' ').pack()); // 디스플레이 클리어
+              _rxAudio.detach();
+            }
+
+            // Gemini 연결 해제
+            await _gemini.disconnect();
+
+            _addDebugLog('모든 연결 리셋 완료');
+
+            // 2. 상태 초기화
+            setState(() {
+              currentState = ApplicationState.ready;
+              _image = null;
+            });
+
+            // 3. run() 함수 실행하여 새로 시작
+            _addDebugLog('앱 재시작 시도');
+            await run();
+            _appendEvent('앱이 완전히 초기화되고 새로 시작되었습니다.');
+          },
+          batteryWidget: getBatteryWidget(),
+        ),
+        body: Stack(
           children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Padding(
-                  padding: EdgeInsets.all(16.0),
-                  child: Text(
-                    '설정',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: () {
-                    setState(() {
-                      _isSettingsPanelVisible = false;
-                    });
-                  },
-                ),
-              ],
-            ),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(16.0),
+            Center(
+              child: Container(
+                margin: const EdgeInsets.symmetric(horizontal: 16),
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _apiKeyController,
-                            decoration: const InputDecoration(
-                              hintText: 'Enter Gemini API Key',
-                              helperText: '보안을 위해 API 키는 안전하게 보관됩니다',
-                              helperStyle: TextStyle(
-                                fontSize: 12,
-                                color: Colors.amber,
-                              ),
-                              prefixIcon: Icon(Icons.security),
-                            ),
-                            obscureText: true, // API 키를 마스킹 처리
-                            enableSuggestions: false,
-                            autocorrect: false,
+                    // 본문 영역 (텍스트 입력창/버튼 제거)
+                    Expanded(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          GestureDetector(
+                            onDoubleTap: () {
+                              setState(() {
+                                if (_image != null) {
+                                  _isImageFullscreen = true;
+                                }
+                              });
+                            },
+                            child: _image ?? Container(),
                           ),
-                        ),
-                        const SizedBox(width: 10),
-                        DropdownButton<GeminiVoiceName>(
-                          value: _voiceName,
-                          onChanged: (GeminiVoiceName? newValue) {
-                            setState(() {
-                              _voiceName = newValue!;
-                            });
-                          },
-                          items: GeminiVoiceName.values
-                              .map<DropdownMenuItem<GeminiVoiceName>>(
-                                  (GeminiVoiceName value) {
-                            return DropdownMenuItem<GeminiVoiceName>(
-                              value: value,
-                              child: Text(value.toString().split('.').last),
-                            );
-                          }).toList(),
-                        ),
-                      ],
-                    ),
-                    const Text(
-                      'API 키는 앱 내에 암호화되어 저장됩니다. GitHub에 푸시하지 마세요.',
-                      style: TextStyle(
-                        color: Colors.grey,
-                        fontSize: 12,
+                          Expanded(
+                            child: ListView.builder(
+                              controller:
+                                  _eventLogController, // Auto-scroll controller
+                              padding: const EdgeInsets.only(
+                                  bottom: 160), // 입력창 높이만큼 패딩 추가
+                              itemCount: _eventLog.length,
+                              itemBuilder: (context, index) {
+                                return Text(
+                                  _eventLog[index],
+                                  style: _textStyle,
+                                );
+                              },
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: _systemInstructionController,
-                      maxLines: 3,
-                      decoration:
-                          const InputDecoration(hintText: 'System Instruction'),
-                    ),
-                    const SizedBox(height: 10),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: ElevatedButton(
-                          onPressed: _savePrefs, child: const Text('Save')),
                     ),
                   ],
                 ),
               ),
             ),
-            // 하단에 버튼 고정
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8.0, top: 8.0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: getFooterButtonsWidget() ?? [],
+            // 하단 고정 텍스트 입력창 영역을 TextInputPanel 위젯으로 교체
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: TextInputPanel(
+                textInputController: _textInputController,
+                onTextSubmit: _handleTextSubmission,
+                buttonTexts: buttonTexts,
               ),
             ),
+            if (_isImageFullscreen)
+              Positioned.fill(
+                child: _buildFullscreenImage(),
+              ),
+            // 플로팅 버튼을 먼저 배치
+            Positioned.fill(
+              child: Align(
+                alignment: Alignment.bottomRight,
+                child: FloatingButtonPanel(
+                  isPlayingAudio: _playingAudio,
+                  isSpeaking: _gemini.isSpeaking(),
+                  onStopPressed: () {
+                    _gemini.stopResponseAudio();
+                    _playingAudio = false;
+                    if (_isFrameConnected && frame != null) {
+                      frame!.sendMessage(
+                          0x0b, TxPlainText(text: 'AI Listening...').pack());
+                      _addDebugLog('Sent TEXT_MSG: AI Listening...');
+                    }
+                    _appendEvent('AI Listening...');
+                    _addDebugLog('오디오 응답 즉시 중단 및 AI Listening... 상태 전환');
+                  },
+                  micButtonWidget: getFloatingActionButtonWidget(
+                      const Icon(Icons.mic), const Icon(Icons.mic_off)),
+                ),
+              ),
+            ),
+            // 디버그 패널과 설정 패널을 마지막에 배치하여 최상단에 표시
+            if (_isDebugPanelVisible)
+              Positioned.fill(
+                child: DebugPanel(
+                  debugLogController: _debugLogController,
+                  debugLog: _debugLog,
+                  onClosePanel: () {
+                    setState(() {
+                      _isDebugPanelVisible = false;
+                    });
+                  },
+                  debugTextStyle: _debugTextStyle,
+                ),
+              ),
+            if (_isSettingsPanelVisible)
+              Positioned.fill(
+                child: SettingsPanel(
+                  apiKeyController: _apiKeyController,
+                  systemInstructionController: _systemInstructionController,
+                  initialVoiceName: _voiceName,
+                  onVoiceNameChanged: (newName) {
+                    setState(() {
+                      _voiceName = newName;
+                    });
+                  },
+                  onSavePrefs: _savePrefs,
+                  onClosePanel: () {
+                    setState(() {
+                      _isSettingsPanelVisible = false;
+                    });
+                  },
+                  footerButtons: getFooterButtonsWidget(),
+                ),
+              ),
           ],
         ),
+        floatingActionButton: Container(), // 기존 floatingActionButton 제거
       ),
-    );
+    ));
   }
 
   // 텍스트 전송 처리 함수 수정
@@ -786,205 +817,5 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
         child: _image ?? Container(),
       ),
     );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    startForegroundService();
-    return WithForegroundTask(
-        child: MaterialApp(
-      title: 'Frame Realtime Gemini Voice and Vision',
-      theme: ThemeData.dark(),
-      home: Scaffold(
-        appBar: AppBar(
-            title: const Text('Frame Realtime Gemini Voice and Vision'),
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.bug_report),
-                onPressed: () {
-                  setState(() {
-                    _isDebugPanelVisible = !_isDebugPanelVisible;
-                  });
-                },
-              ),
-              IconButton(
-                icon: const Icon(Icons.settings),
-                onPressed: () {
-                  setState(() {
-                    _isSettingsPanelVisible = !_isSettingsPanelVisible;
-                  });
-                },
-              ),
-              IconButton(
-                icon: const Icon(Icons.refresh),
-                tooltip: '앱 초기화',
-                onPressed: () async {
-                  setState(() {
-                    _eventLog.clear();
-                  });
-                  _addDebugLog('앱 초기화 버튼 클릭됨: Gemini 연결 재설정');
-                  // 현재 연결 해제
-                  await _gemini.disconnect();
-                  // 최신 설정값으로 Gemini 재연결
-                  await _gemini.connect(
-                    _apiKeyController.text,
-                    _voiceName,
-                    _systemInstructionController.text,
-                  );
-                  _appendEvent('앱이 초기화되고 Gemini에 새로 연결되었습니다.');
-                },
-              ),
-              getBatteryWidget(),
-            ]),
-        body: Stack(
-          children: [
-            Center(
-              child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 16),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.start,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    // 본문 영역 (텍스트 입력창/버튼 제거)
-                    Expanded(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          GestureDetector(
-                            onDoubleTap: () {
-                              setState(() {
-                                if (_image != null) {
-                                  _isImageFullscreen = true;
-                                }
-                              });
-                            },
-                            child: _image ?? Container(),
-                          ),
-                          Expanded(
-                            child: ListView.builder(
-                              controller:
-                                  _eventLogController, // Auto-scroll controller
-                              padding: const EdgeInsets.only(
-                                  bottom: 80), // 입력창 높이만큼 패딩 추가
-                              itemCount: _eventLog.length,
-                              itemBuilder: (context, index) {
-                                return Text(
-                                  _eventLog[index],
-                                  style: _textStyle,
-                                );
-                              },
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            // 하단 고정 텍스트 입력창 및 센드 버튼
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: Container(
-                color: Colors.black.withOpacity(0.95),
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // 숫자 버튼 4개 추가
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: [
-                        for (var i = 1; i <= 4; i++)
-                          ElevatedButton(
-                            onPressed: () {
-                              final text = buttonTexts[i] ?? '';
-                              if (text.isNotEmpty) {
-                                _handleTextSubmission(text);
-                              }
-                            },
-                            child: Text('$i'),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: TextField(
-                            controller: _textInputController,
-                            decoration: const InputDecoration(
-                              hintText: '텍스트 입력...',
-                              border: OutlineInputBorder(),
-                            ),
-                            onSubmitted: (text) {
-                              _handleTextSubmission(text);
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        IconButton(
-                          icon: const Icon(Icons.send),
-                          onPressed: () {
-                            _handleTextSubmission(_textInputController.text);
-                          },
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            if (_isDebugPanelVisible)
-              Positioned.fill(
-                child: _buildDebugPanel(),
-              ),
-            if (_isSettingsPanelVisible)
-              Positioned.fill(
-                child: _buildSettingsPanel(),
-              ),
-            if (_isImageFullscreen)
-              Positioned.fill(
-                child: _buildFullscreenImage(),
-              ),
-          ],
-        ),
-        floatingActionButton: Stack(children: [
-          // Stop(정지) 플로팅 버튼: 오디오 응답 즉시 멈추고 AI Listening... 상태로 전환
-          Positioned(
-            bottom: 140,
-            left: 30,
-            child: FloatingActionButton(
-              onPressed: (_playingAudio || _gemini.isSpeaking())
-                  ? () {
-                      _gemini.stopResponseAudio();
-                      _playingAudio = false;
-                      if (_isFrameConnected && frame != null) {
-                        frame!.sendMessage(
-                            0x0b, TxPlainText(text: 'AI Listening...').pack());
-                        _addDebugLog('Sent TEXT_MSG: AI Listening...');
-                      }
-                      _appendEvent('AI Listening...');
-                      _addDebugLog('오디오 응답 즉시 중단 및 AI Listening... 상태 전환');
-                    }
-                  : null,
-              child: const Icon(Icons.stop),
-              backgroundColor: (_playingAudio || _gemini.isSpeaking())
-                  ? Colors.red
-                  : Colors.grey,
-            ),
-          ),
-          Positioned(
-            bottom: 140,
-            right: 0,
-            child: getFloatingActionButtonWidget(
-                    const Icon(Icons.mic), const Icon(Icons.mic_off)) ??
-                Container(),
-          ),
-        ]),
-      ),
-    ));
   }
 }

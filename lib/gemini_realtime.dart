@@ -38,7 +38,7 @@ class GeminiRealtime {
   // system instruction is also not set in the template map (set during connect())
   final Map<String, dynamic> _setupMap = {
     'setup': {
-      'model': 'models/gemini-2.0-flash-live-001',
+      'model': 'models/gemini-2.0-flash-exp',
       'generation_config': {
         'response_modalities': 'audio',
         'speech_config': {
