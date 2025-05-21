@@ -62,6 +62,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   /// realtime voice application members
   late final GeminiRealtime _gemini;
   GeminiVoiceName _voiceName = GeminiVoiceName.Puck;
+  bool _isFrameConnected = false; // Frame 글래스 연결 상태
 
   // status of audio output with FlutterPCMSound
   bool _playingAudio = false;
@@ -92,11 +93,12 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   // UI display
   final _apiKeyController = TextEditingController();
   final _systemInstructionController = TextEditingController();
+  final _textInputController = TextEditingController();
   final List<String> _eventLog = List.empty(growable: true);
   final _eventLogController = ScrollController();
   static const _textStyle = TextStyle(fontSize: 20);
   String? _errorMsg;
-  bool _isSettingsExpanded = true; // 설정 섹션 확장/축소 상태
+  bool _isSettingsPanelVisible = false;
 
   // 디버깅 패널 관련 변수
   bool _isDebugPanelVisible = false;
@@ -106,6 +108,16 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       TextStyle(fontSize: 14, fontFamily: 'monospace');
 
   bool _isTapProcessing = false;
+
+  // 전체화면 이미지 표시 상태 변수 추가
+  bool _isImageFullscreen = false;
+
+  final Map<int, String> buttonTexts = {
+    1: "이거 치워줘.",
+    2: "용과 상태 어때?",
+    3: "용과 어디에 보관해?",
+    4: "감사합니다"
+  };
 
   MainAppState() {
     // filter logging
@@ -133,7 +145,18 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     // 프레임 렌더링 성능 최적화
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
+    // 항상 전체 모드로만 동작
+    _isFrameConnected = frame != null;
+    _gemini.setMode(GeminiMode.fullMode);
+
     _asyncInit();
+
+    // 자동으로 Gemini 연결 시도 (API 키가 있을 때만)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_apiKeyController.text.isNotEmpty) {
+        run();
+      }
+    });
   }
 
   Future<void> _asyncInit() async {
@@ -156,36 +179,28 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
 
     // then kick off the connection to Frame and start the app if possible, unawaited
     tryScanAndConnectAndStart(andRun: true);
+
+    if (_apiKeyController.text.isNotEmpty) {
+      run();
+    }
   }
 
   /// Feed the audio player with samples if we have some more, but don't send
   /// too much to the player because we want to be able to interrupt quickly
   /// If we don't feed the player and it stops, we won't get called again so we need to kick it off again
   void _onFeed(int remainingFrames) async {
-    // remainingFrames 임계값을 더 낮게 설정하여 더 자주 피드하도록 함
     if (remainingFrames < 1000) {
       if (_gemini.hasResponseAudio()) {
         final audioData = _gemini.getResponseAudioByteData();
-        _addDebugLog(
-            'Feeding audio data: ${audioData.lengthInBytes} bytes, remaining frames: $remainingFrames');
-        try {
-          await FlutterPcmSound.feed(PcmArrayInt16(bytes: audioData));
-          _addDebugLog('Audio feed successful');
-        } catch (e) {
-          _addDebugLog('Error feeding audio: $e');
-          // 오류 발생 시 오디오 재시작 시도
+        if (audioData.lengthInBytes > 0) {
           try {
-            FlutterPcmSound.release();
-            await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
-            FlutterPcmSound.start();
-            _addDebugLog('Audio playback restarted after error');
-          } catch (restartError) {
-            _addDebugLog('Failed to restart audio: $restartError');
+            await FlutterPcmSound.feed(PcmArrayInt16(bytes: audioData));
+          } catch (e) {
+            _addDebugLog('Error feeding audio: $e');
           }
         }
       } else {
-        _log.fine('Response audio ended');
-        _addDebugLog('Response audio ended');
+        // 오디오 버퍼가 비었으면 피드 콜백 중단
         _playingAudio = false;
       }
     }
@@ -197,6 +212,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     await _frameAudioSubs?.cancel();
     await FlutterPcmSound.release();
     _photoTimer?.cancel();
+    _textInputController.dispose();
     super.dispose();
   }
 
@@ -257,66 +273,87 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   /// It has a running main loop in this function and also on the Frame (frame_app.lua)
   @override
   Future<void> run() async {
+    _addDebugLog('앱 실행 시작');
+
     // validate API key exists at least
     _errorMsg = null;
     if (_apiKeyController.text.isEmpty) {
       setState(() {
         _errorMsg = 'Error: Set value for Gemini API Key';
       });
-
+      _addDebugLog('API 키가 설정되지 않았습니다.');
       return;
     }
 
-    // connect to Gemini realtime
-    await _gemini.connect(
-        _apiKeyController.text, _voiceName, _systemInstructionController.text);
+    // Frame 글래스 연결 상태 확인
+    _isFrameConnected = frame != null;
+    _addDebugLog('Frame 글래스 연결 상태: ${_isFrameConnected ? "연결됨" : "연결되지 않음"}');
 
-    if (!_gemini.isConnected()) {
-      _log.severe('Connection to Gemini failed');
-      return;
+    // Frame 글래스가 연결되지 않은 경우 텍스트 전용 모드로 설정
+    if (!_isFrameConnected) {
+      _gemini.setMode(GeminiMode.textOnly);
+      _appendEvent('Frame 글래스가 연결되지 않아 텍스트 전용 모드로 실행됩니다.');
+      _addDebugLog('텍스트 전용 모드로 설정됨');
     }
-
-    setState(() {
-      currentState = ApplicationState.running;
-    });
 
     try {
-      // let Frame know to subscribe for taps and send them to us
-      await frame!.sendMessage(0x10, TxCode(value: 1).pack());
+      // connect to Gemini realtime
+      _addDebugLog('Gemini 연결 시도...');
+      await _gemini.connect(_apiKeyController.text, _voiceName,
+          _systemInstructionController.text);
 
-      // 앱 시작 시 "Double tap to resume!" 메시지 표시
-      await frame!
-          .sendMessage(0x0b, TxPlainText(text: 'Double tap to resume!').pack());
+      if (!_gemini.isConnected()) {
+        _log.severe('Connection to Gemini failed');
+        _addDebugLog('Gemini 연결 실패');
+        return;
+      }
+      _addDebugLog('Gemini 연결 성공');
 
-      // listen for double taps to start/stop transcribing
-      _tapSubs?.cancel();
-      _tapSubs = RxTap().attach(frame!.dataResponse).listen((taps) async {
-        if (_isTapProcessing) return;
-        _isTapProcessing = true;
-
-        if (_gemini.isConnected()) {
-          if (taps >= 2) {
-            if (!_streaming) {
-              await _startFrameStreaming();
-            } else {
-              await _stopFrameStreaming();
-              await frame!.sendMessage(
-                  0x0b, TxPlainText(text: 'Double tap to resume!').pack());
-            }
-          }
-        }
-        _isTapProcessing = false;
+      setState(() {
+        currentState = ApplicationState.running;
       });
 
-      // 사용자가 말하기 시작할 때 "AI 듣는 중..." 표시
-      // await frame!
-      //     .sendMessage(0x0b, TxPlainText(text: 'AI Listening...').pack());
+      if (_isFrameConnected) {
+        // Frame 글래스가 연결된 경우에만 기존 로직 실행
+        _addDebugLog('Frame 글래스 기능 초기화 시작');
+        await frame!.sendMessage(0x10, TxCode(value: 1).pack());
+        await frame!.sendMessage(
+            0x0b, TxPlainText(text: 'Double tap to resume!').pack());
 
-      // // AI가 응답을 시작하면 "AI 응답 중..." 메시지 표시
-      // frame!.sendMessage(0x0b, TxPlainText(text: 'AI Speaking...').pack());
+        _tapSubs?.cancel();
+        _tapSubs = RxTap().attach(frame!.dataResponse).listen((taps) async {
+          if (_isTapProcessing) return;
+          _isTapProcessing = true;
+
+          if (_gemini.isConnected()) {
+            if (taps >= 2) {
+              if (!_streaming) {
+                await _startFrameStreaming();
+              } else {
+                await _stopFrameStreaming();
+                await frame!.sendMessage(
+                    0x0b, TxPlainText(text: 'Double tap to resume!').pack());
+              }
+            }
+          }
+          _isTapProcessing = false;
+        });
+        _addDebugLog('Frame 글래스 기능 초기화 완료');
+        // 앱 초기화 후 자동으로 더블탭 이벤트 트리거 (라이브 스트림 자동 시작)
+        Future.delayed(const Duration(milliseconds: 500), () async {
+          if (_gemini.isConnected() && !_streaming) {
+            _addDebugLog('자동 더블탭 트리거: 라이브 스트림 시작');
+            await _startFrameStreaming();
+          }
+        });
+      } else {
+        _addDebugLog('Frame 글래스가 연결되지 않아 텍스트 전용 모드로 실행됩니다.');
+        _appendEvent('텍스트 입력을 시작할 수 있습니다.');
+      }
     } catch (e) {
       _errorMsg = 'Error executing application logic: $e';
       _log.fine(_errorMsg);
+      _addDebugLog('앱 실행 중 오류 발생: $e');
 
       setState(() {
         currentState = ApplicationState.ready;
@@ -478,8 +515,12 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     if (!_playingAudio) {
       _playingAudio = true;
       _addDebugLog('Audio ready callback triggered');
-      frame!.sendMessage(0x0b, TxPlainText(text: 'AI Speaking...').pack());
-      _addDebugLog('Sent TEXT_MSG: AI Speaking...');
+      // Frame이 연결되어 있을 때만 Frame에 메시지 전송
+      if (_isFrameConnected && frame != null) {
+        frame!.sendMessage(0x0b, TxPlainText(text: 'AI Speaking...').pack());
+        _addDebugLog('Sent TEXT_MSG: AI Speaking...');
+      }
+      // 오디오 재생은 항상 실행
       _onFeed(0);
       _log.fine('Response audio started');
     }
@@ -583,6 +624,170 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     );
   }
 
+  // 설정 패널 위젯 추가 (하단에 버튼 고정)
+  Widget _buildSettingsPanel() {
+    return Container(
+      color: Colors.black87.withOpacity(0.95),
+      child: SafeArea(
+        child: Column(
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.all(16.0),
+                  child: Text(
+                    '설정',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: () {
+                    setState(() {
+                      _isSettingsPanelVisible = false;
+                    });
+                  },
+                ),
+              ],
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _apiKeyController,
+                            decoration: const InputDecoration(
+                              hintText: 'Enter Gemini API Key',
+                              helperText: '보안을 위해 API 키는 안전하게 보관됩니다',
+                              helperStyle: TextStyle(
+                                fontSize: 12,
+                                color: Colors.amber,
+                              ),
+                              prefixIcon: Icon(Icons.security),
+                            ),
+                            obscureText: true, // API 키를 마스킹 처리
+                            enableSuggestions: false,
+                            autocorrect: false,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        DropdownButton<GeminiVoiceName>(
+                          value: _voiceName,
+                          onChanged: (GeminiVoiceName? newValue) {
+                            setState(() {
+                              _voiceName = newValue!;
+                            });
+                          },
+                          items: GeminiVoiceName.values
+                              .map<DropdownMenuItem<GeminiVoiceName>>(
+                                  (GeminiVoiceName value) {
+                            return DropdownMenuItem<GeminiVoiceName>(
+                              value: value,
+                              child: Text(value.toString().split('.').last),
+                            );
+                          }).toList(),
+                        ),
+                      ],
+                    ),
+                    const Text(
+                      'API 키는 앱 내에 암호화되어 저장됩니다. GitHub에 푸시하지 마세요.',
+                      style: TextStyle(
+                        color: Colors.grey,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _systemInstructionController,
+                      maxLines: 3,
+                      decoration:
+                          const InputDecoration(hintText: 'System Instruction'),
+                    ),
+                    const SizedBox(height: 10),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: ElevatedButton(
+                          onPressed: _savePrefs, child: const Text('Save')),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // 하단에 버튼 고정
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8.0, top: 8.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: getFooterButtonsWidget() ?? [],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 텍스트 전송 처리 함수 수정
+  void _handleTextSubmission(String text) {
+    _addDebugLog('텍스트 전송 시도: $text');
+
+    if (text.isEmpty) {
+      _addDebugLog('텍스트가 비어있어 전송하지 않습니다.');
+      return;
+    }
+
+    // AI가 오디오 재생 중이면 즉시 중단
+    if (_playingAudio || _gemini.isSpeaking()) {
+      _addDebugLog('AI 오디오 재생 중단 요청');
+      _gemini.stopResponseAudio();
+      _playingAudio = false;
+      // 필요시 FlutterPcmSound.release(); // 오디오 장치 완전 해제
+    }
+
+    if (!_gemini.isConnected()) {
+      _addDebugLog('Gemini가 연결되지 않아 전송할 수 없습니다.');
+      _appendEvent('Gemini가 연결되지 않았습니다. 연결을 확인해주세요.');
+      return;
+    }
+
+    try {
+      _addDebugLog('현재 Gemini 모드: ${_gemini.getCurrentMode()}');
+      _gemini.sendText(text);
+      _textInputController.clear();
+      _appendEvent('텍스트 전송: $text');
+      _addDebugLog('텍스트 전송 완료');
+    } catch (e) {
+      _addDebugLog('텍스트 전송 중 오류 발생: $e');
+      _appendEvent('텍스트 전송 실패: $e');
+    }
+  }
+
+  // 전체화면 이미지 위젯
+  Widget _buildFullscreenImage() {
+    return GestureDetector(
+      onDoubleTap: () {
+        setState(() {
+          _isImageFullscreen = false;
+        });
+      },
+      child: Container(
+        color: Colors.black,
+        alignment: Alignment.center,
+        child: _image ?? Container(),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     startForegroundService();
@@ -602,6 +807,33 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
                   });
                 },
               ),
+              IconButton(
+                icon: const Icon(Icons.settings),
+                onPressed: () {
+                  setState(() {
+                    _isSettingsPanelVisible = !_isSettingsPanelVisible;
+                  });
+                },
+              ),
+              IconButton(
+                icon: const Icon(Icons.refresh),
+                tooltip: '앱 초기화',
+                onPressed: () async {
+                  setState(() {
+                    _eventLog.clear();
+                  });
+                  _addDebugLog('앱 초기화 버튼 클릭됨: Gemini 연결 재설정');
+                  // 현재 연결 해제
+                  await _gemini.disconnect();
+                  // 최신 설정값으로 Gemini 재연결
+                  await _gemini.connect(
+                    _apiKeyController.text,
+                    _voiceName,
+                    _systemInstructionController.text,
+                  );
+                  _appendEvent('앱이 초기화되고 Gemini에 새로 연결되었습니다.');
+                },
+              ),
               getBatteryWidget(),
             ]),
         body: Stack(
@@ -613,104 +845,94 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
                   mainAxisAlignment: MainAxisAlignment.start,
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    ExpansionTile(
-                      title: const Text('설정'),
-                      initiallyExpanded: _isSettingsExpanded,
-                      onExpansionChanged: (bool expanded) {
-                        setState(() {
-                          _isSettingsExpanded = expanded;
-                        });
-                      },
-                      children: <Widget>[
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: TextField(
-                                    controller: _apiKeyController,
-                                    decoration: const InputDecoration(
-                                      hintText: 'Enter Gemini API Key',
-                                      helperText: '보안을 위해 API 키는 안전하게 보관됩니다',
-                                      helperStyle: TextStyle(
-                                        fontSize: 12,
-                                        color: Colors.amber,
-                                      ),
-                                      prefixIcon: Icon(Icons.security),
-                                    ),
-                                    obscureText: true, // API 키를 마스킹 처리
-                                    enableSuggestions: false,
-                                    autocorrect: false,
-                                  ),
-                                ),
-                                const SizedBox(width: 10),
-                                DropdownButton<GeminiVoiceName>(
-                                  value: _voiceName,
-                                  onChanged: (GeminiVoiceName? newValue) {
-                                    setState(() {
-                                      _voiceName = newValue!;
-                                    });
-                                  },
-                                  items: GeminiVoiceName.values
-                                      .map<DropdownMenuItem<GeminiVoiceName>>(
-                                          (GeminiVoiceName value) {
-                                    return DropdownMenuItem<GeminiVoiceName>(
-                                      value: value,
-                                      child: Text(
-                                          value.toString().split('.').last),
-                                    );
-                                  }).toList(),
-                                ),
-                              ],
+                    // 본문 영역 (텍스트 입력창/버튼 제거)
+                    Expanded(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          GestureDetector(
+                            onDoubleTap: () {
+                              setState(() {
+                                if (_image != null) {
+                                  _isImageFullscreen = true;
+                                }
+                              });
+                            },
+                            child: _image ?? Container(),
+                          ),
+                          Expanded(
+                            child: ListView.builder(
+                              controller:
+                                  _eventLogController, // Auto-scroll controller
+                              padding: const EdgeInsets.only(
+                                  bottom: 80), // 입력창 높이만큼 패딩 추가
+                              itemCount: _eventLog.length,
+                              itemBuilder: (context, index) {
+                                return Text(
+                                  _eventLog[index],
+                                  style: _textStyle,
+                                );
+                              },
                             ),
-                            const Text(
-                              'API 키는 앱 내에 암호화되어 저장됩니다. GitHub에 푸시하지 마세요.',
-                              style: TextStyle(
-                                color: Colors.grey,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 10),
-                        TextField(
-                          controller: _systemInstructionController,
-                          maxLines: 3,
-                          decoration: const InputDecoration(
-                              hintText: 'System Instruction'),
-                        ),
-                        const SizedBox(height: 10),
-                        Align(
-                          alignment: Alignment.centerRight,
-                          child: ElevatedButton(
-                              onPressed: _savePrefs, child: const Text('Save')),
-                        ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            // 하단 고정 텍스트 입력창 및 센드 버튼
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: Container(
+                color: Colors.black.withOpacity(0.95),
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // 숫자 버튼 4개 추가
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        for (var i = 1; i <= 4; i++)
+                          ElevatedButton(
+                            onPressed: () {
+                              final text = buttonTexts[i] ?? '';
+                              if (text.isNotEmpty) {
+                                _handleTextSubmission(text);
+                              }
+                            },
+                            child: Text('$i'),
+                          ),
                       ],
                     ),
-                    if (_errorMsg != null)
-                      Text(_errorMsg!,
-                          style: const TextStyle(backgroundColor: Colors.red)),
-                    Expanded(
-                        child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
+                    const SizedBox(height: 8),
+                    Row(
                       children: [
-                        _image ?? Container(),
                         Expanded(
-                          child: ListView.builder(
-                            controller:
-                                _eventLogController, // Auto-scroll controller
-                            itemCount: _eventLog.length,
-                            itemBuilder: (context, index) {
-                              return Text(
-                                _eventLog[index],
-                                style: _textStyle,
-                              );
+                          child: TextField(
+                            controller: _textInputController,
+                            decoration: const InputDecoration(
+                              hintText: '텍스트 입력...',
+                              border: OutlineInputBorder(),
+                            ),
+                            onSubmitted: (text) {
+                              _handleTextSubmission(text);
                             },
                           ),
                         ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          icon: const Icon(Icons.send),
+                          onPressed: () {
+                            _handleTextSubmission(_textInputController.text);
+                          },
+                        ),
                       ],
-                    )),
+                    ),
                   ],
                 ),
               ),
@@ -719,28 +941,49 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
               Positioned.fill(
                 child: _buildDebugPanel(),
               ),
+            if (_isSettingsPanelVisible)
+              Positioned.fill(
+                child: _buildSettingsPanel(),
+              ),
+            if (_isImageFullscreen)
+              Positioned.fill(
+                child: _buildFullscreenImage(),
+              ),
           ],
         ),
         floatingActionButton: Stack(children: [
-          if (_eventLog.isNotEmpty)
-            Positioned(
-              bottom: 90,
-              right: 20,
-              child: FloatingActionButton(
-                  onPressed: () {
-                    Share.share(_eventLog.join('\n'));
-                  },
-                  child: const Icon(Icons.share)),
-            ),
+          // Stop(정지) 플로팅 버튼: 오디오 응답 즉시 멈추고 AI Listening... 상태로 전환
           Positioned(
-            bottom: 20,
-            right: 20,
+            bottom: 140,
+            left: 30,
+            child: FloatingActionButton(
+              onPressed: (_playingAudio || _gemini.isSpeaking())
+                  ? () {
+                      _gemini.stopResponseAudio();
+                      _playingAudio = false;
+                      if (_isFrameConnected && frame != null) {
+                        frame!.sendMessage(
+                            0x0b, TxPlainText(text: 'AI Listening...').pack());
+                        _addDebugLog('Sent TEXT_MSG: AI Listening...');
+                      }
+                      _appendEvent('AI Listening...');
+                      _addDebugLog('오디오 응답 즉시 중단 및 AI Listening... 상태 전환');
+                    }
+                  : null,
+              child: const Icon(Icons.stop),
+              backgroundColor: (_playingAudio || _gemini.isSpeaking())
+                  ? Colors.red
+                  : Colors.grey,
+            ),
+          ),
+          Positioned(
+            bottom: 140,
+            right: 0,
             child: getFloatingActionButtonWidget(
                     const Icon(Icons.mic), const Icon(Icons.mic_off)) ??
                 Container(),
           ),
         ]),
-        persistentFooterButtons: getFooterButtonsWidget(),
       ),
     ));
   }

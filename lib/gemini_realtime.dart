@@ -10,12 +10,19 @@ import 'audio_data_extractor.dart';
 
 enum GeminiVoiceName { Puck, Charon, Kore, Fenrir, Aoede }
 
+// 모드 열거형 추가
+enum GeminiMode {
+  textOnly, // 텍스트만 사용하는 모드
+  fullMode // 음성, 이미지, 텍스트 모두 사용하는 모드
+}
+
 class GeminiRealtime {
   final _log = Logger("Gem");
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _channelSubs;
   bool _connected = false;
+  GeminiMode _currentMode = GeminiMode.fullMode; // 현재 모드
 
   // 발화 상태 추적을 위한 변수
   bool _isSpeaking = false;
@@ -31,7 +38,7 @@ class GeminiRealtime {
   // system instruction is also not set in the template map (set during connect())
   final Map<String, dynamic> _setupMap = {
     'setup': {
-      'model': 'models/gemini-2.0-flash-exp',
+      'model': 'models/gemini-2.0-flash-live-001',
       'generation_config': {
         'response_modalities': 'audio',
         'speech_config': {
@@ -62,6 +69,11 @@ class GeminiRealtime {
     }
   };
 
+  // 텍스트 입력을 위한 맵 추가
+  final Map<String, dynamic> _realtimeTextInputMap = {
+    'realtimeInput': {'text': ''}
+  };
+
   // audio buffer
   final _audioBuffer = ListQueue<Uint8List>();
 
@@ -79,6 +91,15 @@ class GeminiRealtime {
 
   /// 현재 발화 중인지 여부 반환
   bool isSpeaking() => _isSpeaking;
+
+  /// 현재 모드 반환
+  GeminiMode getCurrentMode() => _currentMode;
+
+  /// 모드 설정
+  void setMode(GeminiMode mode) {
+    _currentMode = mode;
+    _log.info('Gemini 모드 변경: $mode');
+  }
 
   /// Connect to Gemini Live and set up the websocket connection using the specified API key
   Future<bool> connect(
@@ -142,7 +163,6 @@ class GeminiRealtime {
 
     // 발화 중에는 오디오를 Gemini로 전송하지 않음 (하울링 방지)
     if (_isSpeaking) {
-      // 디버그 용도로만 로깅하고 전송은 중단
       _log.fine('SendAudio : 오디오 전송 스킵: AI 말하는 중');
       return;
     }
@@ -151,7 +171,6 @@ class GeminiRealtime {
     var base64audio = base64Encode(pcm16x16);
 
     // set the data into the realtime input map before serializing
-    // TODO can't I just cache the last little map and set it there at least?
     _realtimeAudioInputMap['realtimeInput']['mediaChunks'][0]['data'] =
         base64audio;
 
@@ -162,7 +181,8 @@ class GeminiRealtime {
   /// Send the photo to Gemini, encoded as jpeg
   void sendPhoto(Uint8List jpegBytes) {
     if (!_connected) {
-      eventLogger('App trying to send a photo when disconnected');
+      eventLogger(
+          'App trying to send a photo when disconnected or in text-only mode');
       return;
     }
 
@@ -177,6 +197,36 @@ class GeminiRealtime {
     // send data to websocket
     _log.info('sending photo');
     _channel!.sink.add(jsonEncode(_realtimeImageInputMap));
+  }
+
+  /// Send text to Gemini
+  void sendText(String text) {
+    _log.info('텍스트 전송 시도: $text');
+
+    if (!_connected) {
+      _log.warning('Gemini가 연결되지 않아 텍스트를 전송할 수 없습니다.');
+      eventLogger('App trying to send text when disconnected');
+      return;
+    }
+
+    // 발화 중에는 텍스트를 Gemini로 전송하지 않음
+    if (_isSpeaking) {
+      _log.fine('SendText : 텍스트 전송 스킵: AI 말하는 중');
+      return;
+    }
+
+    try {
+      // set the text into the realtime input map before serializing
+      _realtimeTextInputMap['realtimeInput']['text'] = text;
+      _log.info('텍스트 데이터 준비 완료: ${_realtimeTextInputMap}');
+
+      // send data to websocket
+      _channel!.sink.add(jsonEncode(_realtimeTextInputMap));
+      _log.info('텍스트 전송 완료');
+    } catch (e) {
+      _log.severe('텍스트 전송 중 오류 발생: $e');
+      eventLogger('텍스트 전송 실패: $e');
+    }
   }
 
   /// If there is any audio that has been received from Gemini, ready for playback
@@ -228,17 +278,19 @@ class GeminiRealtime {
   }
 
   /// handle the Gemini server events that come through the websocket
-  /// TODO work out how the closed/session time is up message comes back - maybe just the socket status subscription?
   FutureOr<void> _handleGeminiEvent(dynamic eventJson) async {
     String eventString = utf8.decode(eventJson);
+    _log.info('Gemini 이벤트 수신: $eventString');
 
     // parse the json
     var event = jsonDecode(eventString);
+    _log.info('이벤트 파싱 완료: ${event.toString()}');
 
     // try audio message types first
     var audioData = AudioDataExtractor.extractAudioData(event);
 
     if (audioData != null) {
+      _log.info('오디오 데이터 수신: ${audioData.length} 청크');
       // 오디오 데이터가 있으면 발화 중으로 설정
       if (!_isSpeaking && audioData.isNotEmpty) {
         _setSpeakingState(true);
@@ -246,6 +298,7 @@ class GeminiRealtime {
 
       for (var chunk in audioData) {
         _audioBuffer.add(chunk);
+        _log.fine('오디오 청크 추가: ${chunk.length} 바이트');
 
         // notify the main app in case playback had stopped, it should start again
         audioReadyCallback();
@@ -254,45 +307,38 @@ class GeminiRealtime {
       // some other kind of event
       var serverContent = event['serverContent'];
       if (serverContent != null) {
-        if (serverContent['interrupted'] != null) {
-          // 응답 초기 단계에서는 인터럽션 이벤트 무시
-          // if (_isProcessingResponse) {
-          //   _log.info('초기 응답 단계에서 인터럽션 이벤트 무시됨');
-          //   return;
-          // }
+        _log.info('서버 컨텐츠 수신: $serverContent');
 
-          // 인터럽션 횟수 증가 및 제한 확인
+        if (serverContent['interrupted'] != null) {
+          // 인터럽션 처리
           _interruptionCount++;
+          _log.info('인터럽션 발생: ${_interruptionCount}번째');
 
           if (_interruptionCount > MAX_INTERRUPTIONS) {
             _log.info('최대 인터럽션 횟수 초과: 무시 ($MAX_INTERRUPTIONS)');
             return;
           }
 
-          // process interruption to stop audio
           _audioBuffer.clear();
           eventLogger('---Interruption--- (${_interruptionCount}번째)');
           _log.fine('Response interrupted by user');
           _setSpeakingState(false);
-
-          // TODO communicate interruption playback point back to server?
         } else if (serverContent['turnComplete'] != null) {
-          // server has finished sending
+          _log.info('서버 턴 완료');
           eventLogger('Server turn complete');
 
-          // 발화 종료 처리
           if (_isSpeaking) {
             _setSpeakingState(false);
           }
         } else {
+          _log.info('기타 서버 컨텐츠: $serverContent');
           eventLogger(serverContent);
         }
       } else if (event['setupComplete'] != null) {
+        _log.info('설정 완료');
         eventLogger('Setup is complete');
-        _log.info('Gemini setup is complete');
       } else {
-        // unknown server message
-        _log.info(eventString);
+        _log.info('알 수 없는 서버 메시지: $eventString');
         eventLogger(eventString);
       }
     }
