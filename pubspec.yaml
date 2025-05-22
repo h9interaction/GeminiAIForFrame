@@ -45,7 +45,7 @@ flutter:
 
 flutter_icons:
   android: true
-  ios: false
+  ios: true
   image_path: "assets/icon.png"
   image_path_android: "assets/icon.png"
 
@@ -53,6 +53,6 @@ flutter_native_splash:
   color: "#000000"
   image: assets/splash.png
   android: true
-  ios: false
+  ios: true
   # branding: assets/splash/branding.png # (선택) 하단 브랜드 이미지
   fullscreen: true

@@ -24,6 +24,10 @@ class GeminiRealtime {
   bool _connected = false;
   GeminiMode _currentMode = GeminiMode.fullMode; // 현재 모드
 
+  // 트랜스크립션 버퍼 추가
+  String _userTranscriptBuffer = '';
+  String _aiTranscriptBuffer = '';
+
   // 발화 상태 추적을 위한 변수
   bool _isSpeaking = false;
   // bool _isProcessingResponse = false;
@@ -38,20 +42,25 @@ class GeminiRealtime {
   // system instruction is also not set in the template map (set during connect())
   final Map<String, dynamic> _setupMap = {
     'setup': {
-      'model': 'models/gemini-2.0-flash-exp',
+      'model': 'models/gemini-2.0-flash-live-001',
       'generation_config': {
         'response_modalities': 'audio',
         'speech_config': {
           'voice_config': {
             'prebuilt_voice_config': {'voice_name': 'Puck'}
           }
-        }
+        },
       },
       'system_instruction': {
         'parts': [
           {'text': ''}
         ]
-      }
+      },
+      'output_audio_transcription': {},
+      'input_audio_transcription': {},
+      'tools': [
+        {'googleSearch': {}}
+      ]
     }
   };
   final Map<String, dynamic> _realtimeAudioInputMap = {
@@ -104,14 +113,17 @@ class GeminiRealtime {
   /// Connect to Gemini Live and set up the websocket connection using the specified API key
   Future<bool> connect(
       String apiKey, GeminiVoiceName voice, String systemInstruction) async {
-    eventLogger('Connecting to Gemini');
-    _log.info('Connecting to Gemini');
+    // _log.info('Connecting to Gemini');
+    _log.info(
+        '[Gemini] 연결 시도: API Key, Voice: ${voice.name}, SystemInstruction: $systemInstruction');
 
     // configure the session with the specified voice and system instruction
     _setupMap['setup']['generation_config']['speech_config']['voice_config']
         ['prebuilt_voice_config']['voice_name'] = voice.name;
     _setupMap['setup']['system_instruction']['parts'][0]['text'] =
         systemInstruction;
+
+    _log.info('[Gemini] 세션 설정 준비 완료: ${_setupMap.toString()}');
 
     // get the audio playback ready
     _audioBuffer.clear();
@@ -122,6 +134,7 @@ class GeminiRealtime {
 
     // get a fresh websocket channel each time we start a conversation for now
     await _channel?.sink.close();
+    _log.info('[Gemini] WebSocket 채널 연결 시도...');
     _channel = WebSocketChannel.connect(Uri.parse(
         'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=$apiKey'));
 
@@ -129,23 +142,25 @@ class GeminiRealtime {
     // TODO check what happens if API key is bad, host is bad etc, how long are the timeouts?
     // and return false if not connected properly (or throw the exception and print the error?)
     await _channel!.ready;
+    _log.info('[Gemini] WebSocket 연결 완료');
 
     // set up stream handler for channel to handle events
+    _log.info('[Gemini] WebSocket 스트림 구독 시작');
     _channelSubs = _channel!.stream.listen(_handleGeminiEvent);
 
     // set up the config for the model/modality
-    _log.info(_setupMap);
+    _log.info('[Gemini] 모델/모달리티 설정 전송: ${_setupMap.toString()}');
     _channel!.sink.add(jsonEncode(_setupMap));
 
     _connected = true;
-    eventLogger('Connected');
+    // _log.info('Connected');
+    _log.info('[Gemini] 연결 완료 및 준비됨');
     return _connected;
   }
 
   /// Disconnect from Gemini Live by closing the websocket connection
   Future<void> disconnect() async {
-    eventLogger('Disconnecting from Gemini');
-    _log.info('Disconnecting from Gemini');
+    _log.info('[Gemini] Disconnecting from Gemini');
     _connected = false;
     _isSpeaking = false;
     // _isProcessingResponse = false;
@@ -157,13 +172,13 @@ class GeminiRealtime {
   /// Sends the audio to Gemini - bytes should be provided as PCM16 samples at 16kHz
   void sendAudio(Uint8List pcm16x16) {
     if (!_connected) {
-      eventLogger('App trying to send audio when disconnected');
+      _log.info('[Gemini] App trying to send audio when disconnected');
       return;
     }
 
     // 발화 중에는 오디오를 Gemini로 전송하지 않음 (하울링 방지)
     if (_isSpeaking) {
-      _log.fine('SendAudio : 오디오 전송 스킵: AI 말하는 중');
+      // _log.fine('[Gemini] SendAudio : 오디오 전송 스킵: AI 말하는 중');
       return;
     }
 
@@ -176,13 +191,14 @@ class GeminiRealtime {
 
     // send data to websocket
     _channel!.sink.add(jsonEncode(_realtimeAudioInputMap));
+    // _log.fine('[Gemini] SendAudio ', base64audio);
   }
 
   /// Send the photo to Gemini, encoded as jpeg
   void sendPhoto(Uint8List jpegBytes) {
     if (!_connected) {
-      eventLogger(
-          'App trying to send a photo when disconnected or in text-only mode');
+      _log.info(
+          '[Gemini] App trying to send a photo when disconnected or in text-only mode');
       return;
     }
 
@@ -195,17 +211,17 @@ class GeminiRealtime {
         base64image;
 
     // send data to websocket
-    _log.info('sending photo');
+    // _log.info('[Gemini] sending photo');
     _channel!.sink.add(jsonEncode(_realtimeImageInputMap));
   }
 
   /// Send text to Gemini
   void sendText(String text) {
-    _log.info('텍스트 전송 시도: $text');
+    _log.info('[Gemini] 텍스트 전송 시도: $text');
 
     if (!_connected) {
-      _log.warning('Gemini가 연결되지 않아 텍스트를 전송할 수 없습니다.');
-      eventLogger('App trying to send text when disconnected');
+      _log.warning('[Gemini] Gemini가 연결되지 않아 텍스트를 전송할 수 없습니다.');
+      _log.info('App trying to send text when disconnected');
       return;
     }
 
@@ -225,7 +241,7 @@ class GeminiRealtime {
       _log.info('텍스트 전송 완료');
     } catch (e) {
       _log.severe('텍스트 전송 중 오류 발생: $e');
-      eventLogger('텍스트 전송 실패: $e');
+      _log.info('텍스트 전송 실패: $e');
     }
   }
 
@@ -254,17 +270,19 @@ class GeminiRealtime {
       _log.info('Gemini 발화 상태 변경: $speaking');
 
       if (speaking) {
-        eventLogger('AI 응답 시작');
+        _log.info('AI 응답 시작');
+        // AI 응답 시작 시 사용자 트랜스크립션 출력
+        if (_userTranscriptBuffer.isNotEmpty) {
+          eventLogger('사용자 : $_userTranscriptBuffer');
+          _userTranscriptBuffer = '';
+        }
         // 발화 시작 시 인터럽션 보호 타이머 시작
-        // _isProcessingResponse = true;
         _interruptionProtectionTimer?.cancel();
         _interruptionProtectionTimer = Timer(INTERRUPTION_PROTECTION_TIME, () {
-          // _isProcessingResponse = false;
           _log.info('초기 응답 보호 기간 종료');
         });
       } else {
-        eventLogger('AI 응답 종료');
-        // _isProcessingResponse = false;
+        _log.info('AI 응답 종료');
         _interruptionProtectionTimer?.cancel();
       }
     }
@@ -280,17 +298,17 @@ class GeminiRealtime {
   /// handle the Gemini server events that come through the websocket
   FutureOr<void> _handleGeminiEvent(dynamic eventJson) async {
     String eventString = utf8.decode(eventJson);
-    _log.info('Gemini 이벤트 수신: $eventString');
+    // _log.info('Gemini 이벤트 수신: $eventString');
 
     // parse the json
     var event = jsonDecode(eventString);
-    _log.info('이벤트 파싱 완료: ${event.toString()}');
+    // _log.info('이벤트 파싱 완료: ${event.toString()}');
 
     // try audio message types first
     var audioData = AudioDataExtractor.extractAudioData(event);
 
     if (audioData != null) {
-      _log.info('오디오 데이터 수신: ${audioData.length} 청크');
+      // _log.info('오디오 데이터 수신: ${audioData.length} 청크');
       // 오디오 데이터가 있으면 발화 중으로 설정
       if (!_isSpeaking && audioData.isNotEmpty) {
         _setSpeakingState(true);
@@ -298,7 +316,7 @@ class GeminiRealtime {
 
       for (var chunk in audioData) {
         _audioBuffer.add(chunk);
-        _log.fine('오디오 청크 추가: ${chunk.length} 바이트');
+        // _log.fine('오디오 청크 추가: ${chunk.length} 바이트');
 
         // notify the main app in case playback had stopped, it should start again
         audioReadyCallback();
@@ -307,39 +325,76 @@ class GeminiRealtime {
       // some other kind of event
       var serverContent = event['serverContent'];
       if (serverContent != null) {
-        _log.info('서버 컨텐츠 수신: $serverContent');
+        // _log.info('[Gemini] 서버 컨텐츠 수신: ${serverContent.toString()}');
+
+        // 사용자 트랜스크립션 처리
+        if (serverContent['inputTranscription'] != null) {
+          var text = serverContent['inputTranscription']['text'] ?? '';
+          _userTranscriptBuffer += text;
+          _log.info('[대화] 사용자 : $_userTranscriptBuffer');
+        }
+
+        // AI 트랜스크립션 처리
+        if (serverContent['outputTranscription'] != null) {
+          var text = serverContent['outputTranscription']['text'] ?? '';
+          _aiTranscriptBuffer += text;
+          _log.info('[대화] AI : $_aiTranscriptBuffer');
+        }
+
+        // AI 응답 생성 완료 처리
+        if (serverContent['generationComplete'] == true) {
+          _log.info('[Gemini] AI 응답 생성 완료');
+          if (_aiTranscriptBuffer.isNotEmpty) {
+            eventLogger('AI : $_aiTranscriptBuffer');
+            _aiTranscriptBuffer = '';
+          }
+        }
 
         if (serverContent['interrupted'] != null) {
           // 인터럽션 처리
           _interruptionCount++;
-          _log.info('인터럽션 발생: ${_interruptionCount}번째');
+          _log.info('[Gemini] 인터럽션 발생: ${_interruptionCount}번째');
+          if (_aiTranscriptBuffer.isNotEmpty) {
+            eventLogger('AI : $_aiTranscriptBuffer');
+          }
+          _aiTranscriptBuffer = '';
+
+          if (_userTranscriptBuffer.isNotEmpty) {
+            eventLogger('사용자 : $_userTranscriptBuffer');
+          }
+          _userTranscriptBuffer = '';
 
           if (_interruptionCount > MAX_INTERRUPTIONS) {
-            _log.info('최대 인터럽션 횟수 초과: 무시 ($MAX_INTERRUPTIONS)');
+            _log.info('[Gemini] 최대 인터럽션 횟수 초과: 무시 ($MAX_INTERRUPTIONS)');
             return;
           }
 
           _audioBuffer.clear();
-          eventLogger('---Interruption--- (${_interruptionCount}번째)');
-          _log.fine('Response interrupted by user');
+          _log.info('[Gemini] ---Interruption--- (${_interruptionCount}번째)');
+          _log.fine('[Gemini] Response interrupted by user');
           _setSpeakingState(false);
         } else if (serverContent['turnComplete'] != null) {
-          _log.info('서버 턴 완료');
-          eventLogger('Server turn complete');
+          _log.info('[Gemini] 서버 턴 완료');
+          _log.info('[Gemini] Server turn complete');
+
+          if (_aiTranscriptBuffer.isNotEmpty) {
+            eventLogger('AI : $_aiTranscriptBuffer');
+          }
+          _aiTranscriptBuffer = '';
 
           if (_isSpeaking) {
             _setSpeakingState(false);
           }
         } else {
-          _log.info('기타 서버 컨텐츠: $serverContent');
-          eventLogger(serverContent);
+          // _log.info('[Gemini] 기타 서버 컨텐츠: ${serverContent.toString()}');
+          _log.info(serverContent);
         }
       } else if (event['setupComplete'] != null) {
-        _log.info('설정 완료');
-        eventLogger('Setup is complete');
+        _log.info('[Gemini] 설정 완료');
+        _log.info('[Gemini] Setup is complete');
       } else {
-        _log.info('알 수 없는 서버 메시지: $eventString');
-        eventLogger(eventString);
+        _log.info('[Gemini] 알 수 없는 서버 메시지: $eventString');
+        _log.info(eventString);
       }
     }
   }

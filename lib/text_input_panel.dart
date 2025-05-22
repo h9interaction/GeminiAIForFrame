@@ -12,6 +12,15 @@ class TextInputPanel extends StatelessWidget {
     required this.buttonTexts,
   });
 
+  void _handleSubmit(BuildContext context, String text) {
+    if (text.isNotEmpty) {
+      onTextSubmit(text);
+      textInputController.clear();
+      // 키보드 닫기
+      FocusScope.of(context).unfocus();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -29,7 +38,7 @@ class TextInputPanel extends StatelessWidget {
                   onPressed: () {
                     final text = buttonTexts[i] ?? '';
                     if (text.isNotEmpty) {
-                      onTextSubmit(text);
+                      _handleSubmit(context, text);
                     }
                   },
                   child: Text('$i'),
@@ -46,14 +55,14 @@ class TextInputPanel extends StatelessWidget {
                     hintText: '텍스트 입력...',
                     border: OutlineInputBorder(),
                   ),
-                  onSubmitted: onTextSubmit,
+                  onSubmitted: (text) => _handleSubmit(context, text),
                 ),
               ),
               const SizedBox(width: 8),
               IconButton(
                 icon: const Icon(Icons.send),
                 onPressed: () {
-                  onTextSubmit(textInputController.text);
+                  _handleSubmit(context, textInputController.text);
                 },
               ),
             ],

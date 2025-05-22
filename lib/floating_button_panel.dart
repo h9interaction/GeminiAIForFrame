@@ -20,8 +20,8 @@ class FloatingButtonPanel extends StatelessWidget {
       children: [
         // Stop(정지) 플로팅 버튼: 오디오 응답 즉시 멈추고 AI Listening... 상태로 전환
         Positioned(
-          bottom: 210,
-          right: 0,
+          bottom: 155,
+          right: 15,
           child: FloatingActionButton(
             onPressed: (isPlayingAudio || isSpeaking) ? onStopPressed : null,
             child: const Icon(Icons.stop),
@@ -30,12 +30,12 @@ class FloatingButtonPanel extends StatelessWidget {
           ),
         ),
         // 마이크 버튼
-        if (micButtonWidget != null)
-          Positioned(
-            bottom: 140,
-            right: 0,
-            child: micButtonWidget!,
-          ),
+        // if (micButtonWidget != null)
+        //   Positioned(
+        //     bottom: 155,
+        //     right: 15,
+        //     child: micButtonWidget!,
+        //   ),
       ],
     );
   }

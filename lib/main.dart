@@ -9,9 +9,6 @@ import 'package:flutter_pcm_sound/flutter_pcm_sound.dart';
 import 'package:frame_realtime_gemini_voicevision/api_key_manager.dart';
 import 'package:frame_realtime_gemini_voicevision/audio_upsampler.dart';
 import 'package:frame_realtime_gemini_voicevision/gemini_realtime.dart';
-import 'package:frame_realtime_gemini_voicevision/device/device_factory.dart';
-import 'package:frame_realtime_gemini_voicevision/device/device_interface.dart';
-import 'package:frame_realtime_gemini_voicevision/device/mobile_device.dart';
 import 'package:logging/logging.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:frame_msg/rx/audio.dart';
@@ -27,6 +24,9 @@ import 'package:frame_realtime_gemini_voicevision/debug_panel.dart';
 import 'package:frame_realtime_gemini_voicevision/app_bar_panel.dart';
 import 'package:frame_realtime_gemini_voicevision/text_input_panel.dart';
 import 'package:frame_realtime_gemini_voicevision/floating_button_panel.dart';
+import 'device/device_interface.dart';
+import 'device/mobile_device.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 void main() async {
   // 위젯 바인딩 초기화
@@ -69,13 +69,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   /// realtime voice application members
   late final GeminiRealtime _gemini;
   GeminiVoiceName _voiceName = GeminiVoiceName.Puck;
-  bool _isFrameConnected = false;
-
-  // 디바이스 관련 변수
-  DeviceInterface? _device;
-  StreamSubscription? _deviceAudioSubs;
-  StreamSubscription? _devicePhotoSubs;
-  StreamSubscription? _deviceStateSubs;
+  bool _isFrameConnected = false; // Frame 글래스 연결 상태
 
   // status of audio output with FlutterPCMSound
   bool _playingAudio = false;
@@ -132,6 +126,26 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     4: "오늘 날씨 어때?"
   };
 
+  // 디바이스 타입 상태 변수 및 getter/setter 추가
+  DeviceType _selectedDeviceType = DeviceType.frame;
+  DeviceType get selectedDeviceType => _selectedDeviceType;
+  set selectedDeviceType(DeviceType value) {
+    if (_selectedDeviceType != value) {
+      setState(() {
+        _selectedDeviceType = value;
+        // TODO: 디바이스 전환 함수 호출 예정
+      });
+    }
+  }
+
+  // MobileDevice 인스턴스 및 사진 스트림 구독 변수 추가
+  MobileDevice? _mobileDevice;
+  StreamSubscription<Uint8List>? _mobilePhotoSubs;
+  StreamSubscription<Uint8List>? _mobileAudioSubs;
+
+  StreamSubscription<Widget>? _mobilePreviewSubs; // 프리뷰 스트림 구독 변수
+  Widget? _cameraPreview; // 카메라 프리뷰 위젯 저장 변수
+
   MainAppState() {
     // filter logging
     hierarchicalLoggingEnabled = true;
@@ -182,6 +196,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     FlutterPcmSound.setLogLevel(LogLevel.error);
     try {
       await FlutterPcmSound.setup(sampleRate: sampleRate, channelCount: 1);
+      FlutterPcmSound.start();
       _addDebugLog('Audio setup successful: $sampleRate Hz, 1 channel');
       // 버퍼 크기를 더 작게 조정하여 더 자주 피드하도록 함
       FlutterPcmSound.setFeedThreshold(sampleRate ~/ 30);
@@ -190,160 +205,12 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       _addDebugLog('Error setting up audio: $e');
     }
 
-    await _initializeDevice();
+    // then kick off the connection to Frame and start the app if possible, unawaited
+    tryScanAndConnectAndStart(andRun: true);
 
     if (_apiKeyController.text.isNotEmpty) {
       run();
     }
-  }
-
-  Future<void> _initializeDevice() async {
-    try {
-      _addDebugLog('Frame 글래스 연결 시도 중...');
-
-      // Frame 글래스 연결 시도
-      bool frameConnected = await tryScanAndConnect();
-
-      if (frameConnected) {
-        _addDebugLog('Frame 글래스 연결 성공');
-        _device = DeviceFactory.createDevice(this);
-      } else {
-        _addDebugLog('Frame 글래스를 찾을 수 없어 모바일 디바이스로 전환합니다.');
-        _device = DeviceFactory.createDevice(null);
-      }
-
-      await _device!.initialize();
-      _isFrameConnected = _device!.currentState.type == DeviceType.frame;
-
-      setState(() {
-        currentState = ApplicationState.ready;
-      });
-
-      _addDebugLog('${_isFrameConnected ? "Frame 글래스" : "모바일 디바이스"} 초기화 완료');
-    } catch (e) {
-      _addDebugLog('디바이스 초기화 중 오류 발생: $e');
-      // 오류 발생 시 모바일 디바이스로 폴백
-      if (_device == null || _device!.currentState.type == DeviceType.frame) {
-        _addDebugLog('모바일 디바이스로 전환 시도...');
-        _device = DeviceFactory.createDevice(null);
-        await _device!.initialize();
-        _isFrameConnected = false;
-        setState(() {
-          currentState = ApplicationState.ready;
-        });
-        _addDebugLog('모바일 디바이스로 전환 완료');
-      }
-    }
-  }
-
-  Future<bool> tryScanAndConnect() async {
-    try {
-      if (await fbp.FlutterBluePlus.isSupported == false) {
-        _addDebugLog('Bluetooth is not supported on this device');
-        return false;
-      }
-
-      // 블루투스 상태 확인
-      if (await fbp.FlutterBluePlus.adapterState.first ==
-          fbp.BluetoothAdapterState.off) {
-        _addDebugLog('Bluetooth is turned off');
-        return false;
-      }
-
-      _addDebugLog('Frame 글래스 스캔 시작...');
-
-      // 이전 스캔 중지
-      await fbp.FlutterBluePlus.stopScan();
-
-      // 스캔 시작
-      bool deviceFound = false;
-      final completer = Completer<bool>();
-
-      final subscription = fbp.FlutterBluePlus.scanResults.listen((results) {
-        for (final r in results) {
-          if (r.device.platformName.startsWith('Frame')) {
-            deviceFound = true;
-            fbp.FlutterBluePlus.stopScan();
-            _addDebugLog('Frame 글래스 발견: ${r.device.platformName}');
-            r.device.connect().then((_) {
-              _addDebugLog('Frame 글래스 연결됨');
-              completer.complete(true);
-            }).catchError((e) {
-              _addDebugLog('Frame 글래스 연결 실패: $e');
-              completer.complete(false);
-            });
-            break;
-          }
-        }
-      });
-
-      // 스캔 시작
-      await fbp.FlutterBluePlus.startScan(
-        timeout: const Duration(seconds: 5),
-        androidUsesFineLocation: false,
-      );
-
-      // 5초 후에도 발견되지 않으면 false 반환
-      Timer(const Duration(seconds: 5), () {
-        if (!deviceFound && !completer.isCompleted) {
-          _addDebugLog('Frame 글래스를 찾을 수 없음');
-          completer.complete(false);
-        }
-      });
-
-      final result = await completer.future;
-      subscription.cancel();
-      return result;
-    } catch (e) {
-      _addDebugLog('Frame 글래스 스캔/연결 중 오류 발생: $e');
-      return false;
-    }
-  }
-
-  Future<void> _resetApp() async {
-    setState(() {
-      _eventLog.clear();
-    });
-    _addDebugLog('앱 초기화 시작: 모든 연결 리셋');
-
-    // 1. 기존 연결 및 상태 리셋
-    _streaming = false;
-    _playingAudio = false;
-
-    // 오디오 관련 리소스 정리
-    await FlutterPcmSound.release();
-    _frameAudioSubs?.cancel();
-    _photoTimer?.cancel();
-    _photoTimer = null;
-
-    // Frame 연결 관련 정리
-    if (_isFrameConnected && frame != null) {
-      _tapSubs?.cancel();
-      await frame!.sendMessage(0x30, TxCode(value: 0).pack()); // 오디오 스트리밍 중지
-      await frame!.sendMessage(0x10, TxCode(value: 0).pack()); // 탭 이벤트 중지
-      await frame!
-          .sendMessage(0x0b, TxPlainText(text: ' ').pack()); // 디스플레이 클리어
-      _rxAudio.detach();
-    }
-
-    // Gemini 연결 해제
-    await _gemini.disconnect();
-
-    _addDebugLog('모든 연결 리셋 완료');
-
-    // 2. 상태 초기화
-    setState(() {
-      currentState = ApplicationState.ready;
-      _image = null;
-    });
-
-    // 3. 디바이스 재초기화
-    await _initializeDevice();
-
-    // 4. run() 함수 실행하여 새로 시작
-    _addDebugLog('앱 재시작 시도');
-    await run();
-    _appendEvent('앱이 완전히 초기화되고 새로 시작되었습니다.');
   }
 
   /// Feed the audio player with samples if we have some more, but don't send
@@ -371,13 +238,10 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   Future<void> dispose() async {
     await _gemini.disconnect();
     await _frameAudioSubs?.cancel();
-    await _deviceAudioSubs?.cancel();
-    await _devicePhotoSubs?.cancel();
-    await _deviceStateSubs?.cancel();
-    await _device?.dispose();
     await FlutterPcmSound.release();
     _photoTimer?.cancel();
     _textInputController.dispose();
+    await _mobilePreviewSubs?.cancel();
     super.dispose();
   }
 
@@ -440,7 +304,6 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   Future<void> run() async {
     _addDebugLog('앱 실행 시작');
 
-    // validate API key exists at least
     _errorMsg = null;
     if (_apiKeyController.text.isEmpty) {
       setState(() {
@@ -450,16 +313,37 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       return;
     }
 
+    // 디바이스 타입에 따라 분기
+    if (_selectedDeviceType == DeviceType.frame) {
+      _isFrameConnected = frame != null;
+      _addDebugLog('Frame 글래스 연결 상태: ${_isFrameConnected ? "연결됨" : "연결되지 않음"}');
+      if (!_isFrameConnected) {
+        _gemini.setMode(GeminiMode.textOnly);
+        _appendEvent('Frame 글래스가 연결되지 않아 텍스트 전용 모드로 실행됩니다.');
+        _addDebugLog('텍스트 전용 모드로 설정됨');
+        // return;
+      }
+      // (기존 Frame 연결 및 스트림 로직)
+      // ...
+    } else {
+      // Mobile 모드
+      _isFrameConnected = false;
+      _gemini.setMode(GeminiMode.textOnly);
+      _appendEvent('모바일 디바이스 모드로 실행됩니다.');
+      // Frame 관련 타이머/스트림/구독 해제
+      _photoTimer?.cancel();
+      _photoTimer = null;
+      _frameAudioSubs?.cancel();
+      _frameAudioSubs = null;
+      _tapSubs?.cancel();
+      _tapSubs = null;
+      // Frame 관련 detach
+      _rxAudio.detach();
+      // (MobileDevice의 사진 스트림은 이미 _switchDevice에서 listen 중)
+      // 필요시 Mobile 오디오/기능 추가
+    }
+
     try {
-      // 디바이스 초기화
-      _device = DeviceFactory.createDevice(frame != null ? this : null);
-      await _device!.initialize();
-
-      // Frame 글래스 연결 상태 확인
-      _isFrameConnected = _device!.currentState.type == DeviceType.frame;
-      _addDebugLog(
-          '디바이스 타입: ${_device!.currentState.type == DeviceType.frame ? "Frame 글래스" : "모바일"}');
-
       // connect to Gemini realtime
       _addDebugLog('Gemini 연결 시도...');
       await _gemini.connect(_apiKeyController.text, _voiceName,
@@ -476,26 +360,43 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
         currentState = ApplicationState.running;
       });
 
-      // 디바이스 스트림 구독
-      _deviceAudioSubs = _device!.audioStream.listen(_handleAudioData);
-      _devicePhotoSubs = _device!.photoStream.listen(_handlePhotoData);
-      _deviceStateSubs = _device!.stateStream.listen((state) {
-        setState(() {
-          _playingAudio = state.isAudioPlaying;
+      if (_isFrameConnected) {
+        // Frame 글래스가 연결된 경우에만 기존 로직 실행
+        _addDebugLog('Frame 글래스 기능 초기화 시작');
+        await frame!.sendMessage(0x10, TxCode(value: 1).pack());
+        await frame!.sendMessage(
+            0x0b, TxPlainText(text: 'Double tap to resume!').pack());
+
+        _tapSubs?.cancel();
+        _tapSubs = RxTap().attach(frame!.dataResponse).listen((taps) async {
+          if (_isTapProcessing) return;
+          _isTapProcessing = true;
+
+          if (_gemini.isConnected()) {
+            if (taps >= 2) {
+              if (!_streaming) {
+                await _startFrameStreaming();
+              } else {
+                await _stopFrameStreaming();
+                await frame!.sendMessage(
+                    0x0b, TxPlainText(text: 'Double tap to resume!').pack());
+              }
+            }
+          }
+          _isTapProcessing = false;
         });
-      });
-
-      // 오디오 스트림 시작
-      await _device!.startAudioStream();
-
-      // 사진 캡처 시작 (디바이스 타입에 따라 다른 주기 설정)
-      final captureInterval = _device!.currentState.type == DeviceType.frame
-          ? const Duration(seconds: 3)
-          : const Duration(milliseconds: 500);
-      await _device!.startPhotoCapture(captureInterval);
-
-      _appendEvent(
-          '${_isFrameConnected ? "Frame 글래스" : "모바일 카메라/마이크"}를 사용하여 실행됩니다.');
+        _addDebugLog('Frame 글래스 기능 초기화 완료');
+        // 앱 초기화 후 자동으로 더블탭 이벤트 트리거 (라이브 스트림 자동 시작)
+        Future.delayed(const Duration(milliseconds: 500), () async {
+          if (_gemini.isConnected() && !_streaming) {
+            _addDebugLog('자동 더블탭 트리거: 라이브 스트림 시작');
+            await _startFrameStreaming();
+          }
+        });
+      } else {
+        _addDebugLog('Frame 글래스가 연결되지 않아 텍스트 전용 모드로 실행됩니다.');
+        _appendEvent('텍스트 입력을 시작할 수 있습니다.');
+      }
     } catch (e) {
       _errorMsg = 'Error executing application logic: $e';
       _log.fine(_errorMsg);
@@ -515,16 +416,22 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       currentState = ApplicationState.canceling;
     });
 
-    // 디바이스 스트림 중지
-    await _device?.stopAudioStream();
-    await _device?.stopPhotoCapture();
+    // cancel the subscription for taps
+    _tapSubs?.cancel();
 
-    // 스트림 구독 취소
-    await _deviceAudioSubs?.cancel();
-    await _devicePhotoSubs?.cancel();
-    await _deviceStateSubs?.cancel();
+    // cancel the conversation if it's running
+    if (_streaming) _stopFrameStreaming();
 
-    // Gemini 연결 해제
+    // tell the Frame to stop streaming audio (regardless of if we are currently)
+    await frame!.sendMessage(0x30, TxCode(value: 0).pack());
+
+    // let Frame know to stop sending taps too
+    await frame!.sendMessage(0x10, TxCode(value: 0).pack());
+
+    // clear the display
+    await frame!.sendMessage(0x0b, TxPlainText(text: ' ').pack());
+
+    // disconnect from Gemini
     await _gemini.disconnect();
 
     setState(() {
@@ -713,25 +620,6 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     });
   }
 
-  Future<void> _handleAudioData(Uint8List data) async {
-    try {
-      _gemini.sendAudio(data);
-    } catch (e) {
-      _addDebugLog('오디오 데이터 처리 중 오류 발생: $e');
-    }
-  }
-
-  Future<void> _handlePhotoData(Uint8List data) async {
-    try {
-      _gemini.sendPhoto(data);
-      setState(() {
-        _image = Image.memory(data);
-      });
-    } catch (e) {
-      _addDebugLog('사진 데이터 처리 중 오류 발생: $e');
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     startForegroundService();
@@ -740,208 +628,168 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       title: 'AI Home Agent',
       theme: ThemeData.dark(),
       home: Scaffold(
-        appBar: CustomAppBar(
-          title: 'AI Home Agent',
-          onBugReportPressed: () {
-            setState(() {
-              _isDebugPanelVisible = !_isDebugPanelVisible;
-            });
-          },
-          onSettingsPressed: () {
-            setState(() {
-              _isSettingsPanelVisible = !_isSettingsPanelVisible;
-            });
-          },
-          onRefreshPressed: () async {
-            setState(() {
-              _eventLog.clear();
-            });
-            _addDebugLog('앱 초기화 시작: 모든 연결 리셋');
-
-            // 1. 기존 연결 및 상태 리셋
-            _streaming = false;
-            _playingAudio = false;
-
-            // 오디오 관련 리소스 정리
-            await FlutterPcmSound.release();
-            _frameAudioSubs?.cancel();
-            _photoTimer?.cancel();
-            _photoTimer = null;
-
-            // Frame 연결 관련 정리
-            if (_isFrameConnected && frame != null) {
-              _tapSubs?.cancel();
-              await frame!
-                  .sendMessage(0x30, TxCode(value: 0).pack()); // 오디오 스트리밍 중지
-              await frame!
-                  .sendMessage(0x10, TxCode(value: 0).pack()); // 탭 이벤트 중지
-              await frame!.sendMessage(
-                  0x0b, TxPlainText(text: ' ').pack()); // 디스플레이 클리어
-              _rxAudio.detach();
-            }
-
-            // Gemini 연결 해제
-            await _gemini.disconnect();
-
-            _addDebugLog('모든 연결 리셋 완료');
-
-            // 2. 상태 초기화
-            setState(() {
-              currentState = ApplicationState.ready;
-              _image = null;
-            });
-
-            // 3. run() 함수 실행하여 새로 시작
-            _addDebugLog('앱 재시작 시도');
-            await run();
-            _appendEvent('앱이 완전히 초기화되고 새로 시작되었습니다.');
-          },
-          batteryWidget: getBatteryWidget(),
-        ),
-        body: Stack(
-          children: [
-            Center(
-              child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 16),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.start,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    // 본문 영역 (텍스트 입력창/버튼 제거)
-                    Expanded(
+        appBar: _isImageFullscreen
+            ? null
+            : CustomAppBar(
+                title: 'AI Home Agent',
+                onBugReportPressed: () {
+                  setState(() {
+                    _isDebugPanelVisible = !_isDebugPanelVisible;
+                  });
+                },
+                onSettingsPressed: () {
+                  setState(() {
+                    _isSettingsPanelVisible = !_isSettingsPanelVisible;
+                  });
+                },
+                onRefreshPressed: () async {
+                  await _switchDevice(_selectedDeviceType);
+                  _appendEvent('앱이 완전히 초기화되고 새로 시작되었습니다.');
+                },
+                batteryWidget: getBatteryWidget(),
+              ),
+        body: _isImageFullscreen
+            ? _buildFullscreenImage()
+            : Stack(
+                children: [
+                  Center(
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 16),
                       child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisAlignment: MainAxisAlignment.start,
+                        crossAxisAlignment: CrossAxisAlignment.end,
                         children: [
-                          if (_device?.currentState.type == DeviceType.mobile)
-                            // 모바일 디바이스일 때 실시간 카메라 프리뷰 표시
-                            StreamBuilder<Widget>(
-                              stream: (_device as MobileDevice).previewStream,
-                              builder: (context, snapshot) {
-                                if (snapshot.hasData) {
-                                  return AspectRatio(
-                                    aspectRatio: 3 / 4,
-                                    child: Container(
-                                      decoration: BoxDecoration(
-                                        border: Border.all(
-                                          color: Colors.blue,
-                                          width: 2,
-                                        ),
-                                      ),
-                                      child: snapshot.data!,
-                                    ),
-                                  );
-                                }
-                                return Container();
-                              },
-                            )
-                          else
-                            GestureDetector(
-                              onDoubleTap: () {
-                                setState(() {
-                                  if (_image != null) {
-                                    _isImageFullscreen = true;
-                                  }
-                                });
-                              },
-                              child: _image ?? Container(),
-                            ),
+                          // 본문 영역 (텍스트 입력창/버튼 제거)
                           Expanded(
-                            child: ListView.builder(
-                              controller:
-                                  _eventLogController, // Auto-scroll controller
-                              padding: const EdgeInsets.only(
-                                  bottom: 160), // 입력창 높이만큼 패딩 추가
-                              itemCount: _eventLog.length,
-                              itemBuilder: (context, index) {
-                                return Text(
-                                  _eventLog[index],
-                                  style: _textStyle,
-                                );
-                              },
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                GestureDetector(
+                                  onDoubleTap: () {
+                                    setState(() {
+                                      if (_selectedDeviceType ==
+                                              DeviceType.mobile &&
+                                          _cameraPreview != null) {
+                                        _isImageFullscreen =
+                                            !_isImageFullscreen;
+                                      } else if (_image != null) {
+                                        _isImageFullscreen = true;
+                                      }
+                                    });
+                                  },
+                                  child: _selectedDeviceType ==
+                                              DeviceType.mobile &&
+                                          _cameraPreview != null
+                                      ? Container(
+                                          width: double.infinity,
+                                          height:
+                                              MediaQuery.of(context).size.width,
+                                          child: _cameraPreview!,
+                                        )
+                                      : _image ?? Container(),
+                                ),
+                                Expanded(
+                                  child: ListView.builder(
+                                    controller:
+                                        _eventLogController, // Auto-scroll controller
+                                    padding: const EdgeInsets.only(
+                                        bottom: 160), // 입력창 높이만큼 패딩 추가
+                                    itemCount: _eventLog.length,
+                                    itemBuilder: (context, index) {
+                                      return Text(
+                                        _eventLog[index],
+                                        style: _textStyle,
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ],
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                  // 하단 고정 텍스트 입력창 영역을 TextInputPanel 위젯으로 교체
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    child: TextInputPanel(
+                      textInputController: _textInputController,
+                      onTextSubmit: _handleTextSubmission,
+                      buttonTexts: buttonTexts,
+                    ),
+                  ),
+                  if (!_isImageFullscreen) // 전체화면이 아닐 때만 플로팅 버튼 표시
+                    Positioned.fill(
+                      child: Align(
+                        alignment: Alignment.bottomRight,
+                        child: FloatingButtonPanel(
+                          isPlayingAudio: _playingAudio,
+                          isSpeaking: _gemini.isSpeaking(),
+                          onStopPressed: () {
+                            _gemini.stopResponseAudio();
+                            _playingAudio = false;
+                            if (_isFrameConnected && frame != null) {
+                              frame!.sendMessage(0x0b,
+                                  TxPlainText(text: 'AI Listening...').pack());
+                              _addDebugLog('Sent TEXT_MSG: AI Listening...');
+                            }
+                            _appendEvent('AI Listening...');
+                            _addDebugLog(
+                                '오디오 응답 즉시 중단 및 AI Listening... 상태 전환');
+                          },
+                          // micButtonWidget: getFloatingActionButtonWidget(
+                          //     const Icon(Icons.mic), const Icon(Icons.mic_off)),
+                        ),
+                      ),
+                    ),
+                  // 디버그 패널과 설정 패널을 마지막에 배치하여 최상단에 표시
+                  if (_isDebugPanelVisible)
+                    Positioned.fill(
+                      child: DebugPanel(
+                        debugLogController: _debugLogController,
+                        debugLog: _debugLog,
+                        onClosePanel: () {
+                          setState(() {
+                            _isDebugPanelVisible = false;
+                          });
+                        },
+                        debugTextStyle: _debugTextStyle,
+                      ),
+                    ),
+                  if (_isSettingsPanelVisible)
+                    Positioned.fill(
+                      child: SettingsPanel(
+                        apiKeyController: _apiKeyController,
+                        systemInstructionController:
+                            _systemInstructionController,
+                        initialVoiceName: _voiceName,
+                        onVoiceNameChanged: (newName) {
+                          setState(() {
+                            _voiceName = newName;
+                          });
+                        },
+                        onSavePrefs: _savePrefs,
+                        onClosePanel: () {
+                          setState(() {
+                            _isSettingsPanelVisible = false;
+                          });
+                        },
+                        footerButtons: getFooterButtonsWidget(),
+                        selectedDeviceType: selectedDeviceType,
+                        onDeviceTypeChanged: (type) =>
+                            selectedDeviceType = type,
+                        onRefreshDevice: () async {
+                          await _switchDevice(_selectedDeviceType);
+                          _appendEvent('앱이 완전히 초기화되고 새로 시작되었습니다.');
+                        },
+                      ),
+                    ),
+                ],
               ),
-            ),
-            // 하단 고정 텍스트 입력창 영역을 TextInputPanel 위젯으로 교체
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: TextInputPanel(
-                textInputController: _textInputController,
-                onTextSubmit: _handleTextSubmission,
-                buttonTexts: buttonTexts,
-              ),
-            ),
-            if (_isImageFullscreen)
-              Positioned.fill(
-                child: _buildFullscreenImage(),
-              ),
-            // 플로팅 버튼을 먼저 배치
-            Positioned.fill(
-              child: Align(
-                alignment: Alignment.bottomRight,
-                child: FloatingButtonPanel(
-                  isPlayingAudio: _playingAudio,
-                  isSpeaking: _gemini.isSpeaking(),
-                  onStopPressed: () {
-                    _gemini.stopResponseAudio();
-                    _playingAudio = false;
-                    if (_isFrameConnected && frame != null) {
-                      frame!.sendMessage(
-                          0x0b, TxPlainText(text: 'AI Listening...').pack());
-                      _addDebugLog('Sent TEXT_MSG: AI Listening...');
-                    }
-                    _appendEvent('AI Listening...');
-                    _addDebugLog('오디오 응답 즉시 중단 및 AI Listening... 상태 전환');
-                  },
-                  micButtonWidget: getFloatingActionButtonWidget(
-                      const Icon(Icons.mic), const Icon(Icons.mic_off)),
-                ),
-              ),
-            ),
-            // 디버그 패널과 설정 패널을 마지막에 배치하여 최상단에 표시
-            if (_isDebugPanelVisible)
-              Positioned.fill(
-                child: DebugPanel(
-                  debugLogController: _debugLogController,
-                  debugLog: _debugLog,
-                  onClosePanel: () {
-                    setState(() {
-                      _isDebugPanelVisible = false;
-                    });
-                  },
-                  debugTextStyle: _debugTextStyle,
-                ),
-              ),
-            if (_isSettingsPanelVisible)
-              Positioned.fill(
-                child: SettingsPanel(
-                  apiKeyController: _apiKeyController,
-                  systemInstructionController: _systemInstructionController,
-                  initialVoiceName: _voiceName,
-                  onVoiceNameChanged: (newName) {
-                    setState(() {
-                      _voiceName = newName;
-                    });
-                  },
-                  onSavePrefs: _savePrefs,
-                  onClosePanel: () {
-                    setState(() {
-                      _isSettingsPanelVisible = false;
-                    });
-                  },
-                  footerButtons: getFooterButtonsWidget(),
-                ),
-              ),
-          ],
-        ),
-        floatingActionButton: Container(), // 기존 floatingActionButton 제거
+        floatingActionButton: Container(), // 기졸 floatingActionButton 제거
       ),
     ));
   }
@@ -973,7 +821,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       _addDebugLog('현재 Gemini 모드: ${_gemini.getCurrentMode()}');
       _gemini.sendText(text);
       _textInputController.clear();
-      _appendEvent('텍스트 전송: $text');
+      _appendEvent('사용자 : $text');
       _addDebugLog('텍스트 전송 완료');
     } catch (e) {
       _addDebugLog('텍스트 전송 중 오류 발생: $e');
@@ -992,8 +840,90 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       child: Container(
         color: Colors.black,
         alignment: Alignment.center,
-        child: _image ?? Container(),
+        child:
+            (_selectedDeviceType == DeviceType.mobile && _cameraPreview != null)
+                ? _cameraPreview!
+                : _image ?? Container(),
       ),
     );
+  }
+
+  Future<void> _switchDevice(DeviceType type) async {
+    // 기존 연결/스트림 해제
+    await _gemini.disconnect();
+    await _frameAudioSubs?.cancel();
+    await FlutterPcmSound.release();
+    _photoTimer?.cancel();
+    // MobileDevice 리소스 정리
+    await _mobilePhotoSubs?.cancel();
+    await _mobileDevice?.dispose();
+    _mobileDevice = null;
+    await _mobilePreviewSubs?.cancel(); // 프리뷰 스트림 구독 해제
+    _cameraPreview = null; // 카메라 프리뷰 초기화
+
+    // 상태 초기화
+    setState(() {
+      _streaming = false;
+      _playingAudio = false;
+      _image = null;
+      _eventLog.clear();
+      currentState = ApplicationState.ready;
+    });
+
+    if (type == DeviceType.frame) {
+      // Frame 연결 시도
+      _isFrameConnected = frame != null;
+      if (_isFrameConnected) {
+        _gemini.setMode(GeminiMode.fullMode);
+        await run();
+      } else {
+        _gemini.setMode(GeminiMode.textOnly);
+        _appendEvent('Frame 글래스가 연결되지 않아 텍스트 전용 모드로 실행됩니다.');
+      }
+    } else {
+      // Mobile 연결 시도
+      _isFrameConnected = false;
+      _gemini.setMode(GeminiMode.textOnly);
+      _appendEvent('모바일 디바이스 모드로 실행됩니다.');
+
+      // MobileDevice 생성 및 초기화
+      _mobileDevice = MobileDevice();
+      await _mobileDevice!.initialize();
+      // 사진 스트림 listen
+      _mobilePhotoSubs = _mobileDevice!.photoStream.listen((bytes) {
+        setState(() {
+          _image = Image.memory(bytes, gaplessPlayback: true);
+        });
+        if (_gemini.isConnected()) {
+          _addDebugLog('MobileDevice photoStream: sendPhoto 호출');
+          _gemini.sendPhoto(bytes);
+        }
+      });
+      // 오디오 스트림 listen
+      _mobileAudioSubs = _mobileDevice!.audioStream.listen((pcmBytes) {
+        _addDebugLog('MobileDevice audioStream: ${pcmBytes.length} bytes');
+        if (_gemini.isConnected()) {
+          _addDebugLog('MobileDevice audioStream: sendAudio 호출');
+          _gemini.sendAudio(pcmBytes);
+        }
+      });
+      // 오디오 스트림 시작
+      await _mobileDevice!.startAudioStream();
+      // 사진 캡처 시작 (0.5초 간격)
+      await _mobileDevice!.startPhotoCapture(const Duration(milliseconds: 500));
+
+      // **여기서 오디오 재생 세팅**
+      await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
+      FlutterPcmSound.start();
+
+      // 카메라 프리뷰 스트림 구독
+      _mobilePreviewSubs = _mobileDevice!.previewStream.listen((preview) {
+        setState(() {
+          _cameraPreview = preview;
+        });
+      });
+
+      await run();
+    }
   }
 }

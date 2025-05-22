@@ -109,17 +109,42 @@ class MobileDevice implements DeviceInterface {
 
           await _cameraController!.initialize();
 
+          // 자동 플래시 비활성화
+          await _cameraController!.setFlashMode(FlashMode.off);
+
           // 카메라 프리뷰 위젯 생성 및 스트림에 추가
           _previewController.add(
             ClipRect(
               child: Transform.scale(
                 scale: 1.0,
                 child: Center(
-                  child: CameraPreview(_cameraController!),
+                  child: AspectRatio(
+                    aspectRatio: 1 / _cameraController!.value.aspectRatio,
+                    child: CameraPreview(_cameraController!),
+                  ),
                 ),
               ),
             ),
           );
+
+          // 카메라 프리뷰 자동 업데이트 시작
+          _cameraController!.startImageStream((image) {
+            if (_previewController.hasListener) {
+              _previewController.add(
+                ClipRect(
+                  child: Transform.scale(
+                    scale: 1.0,
+                    child: Center(
+                      child: AspectRatio(
+                        aspectRatio: 1 / _cameraController!.value.aspectRatio,
+                        child: CameraPreview(_cameraController!),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }
+          });
 
           _log.info('카메라 초기화 완료');
         }
@@ -149,6 +174,7 @@ class MobileDevice implements DeviceInterface {
     _isCapturing = false;
     await stopAudioStream();
     await stopPhotoCapture();
+    await _cameraController?.stopImageStream();
     await _cameraController?.dispose();
     await _audioRecorder.dispose();
     await _stateController.close();

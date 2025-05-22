@@ -31,11 +31,11 @@ class CustomAppBar extends StatelessWidget implements PreferredSizeWidget {
           tooltip: '설정',
           onPressed: onSettingsPressed,
         ),
-        IconButton(
-          icon: const Icon(Icons.refresh),
-          tooltip: '앱 초기화',
-          onPressed: onRefreshPressed,
-        ),
+        // IconButton(
+        //   icon: const Icon(Icons.refresh),
+        //   tooltip: '앱 초기화',
+        //   onPressed: onRefreshPressed,
+        // ),
         if (batteryWidget != null) batteryWidget!,
       ],
     );

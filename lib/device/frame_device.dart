@@ -60,6 +60,17 @@ class FrameDevice implements DeviceInterface {
         );
       }
 
+      // Frame 글래스 연결 상태 확인을 위해 간단한 메시지 전송 시도
+      try {
+        await frameState.frame!
+            .sendMessage(0x0b, TxPlainText(text: ' ').pack());
+      } catch (e) {
+        throw DeviceException(
+          DeviceErrorType.hardwareError,
+          'Frame device is not properly connected',
+        );
+      }
+
       _updateState(streamingState: StreamingState.idle);
       _log.info('Frame device initialized');
     } catch (e) {
