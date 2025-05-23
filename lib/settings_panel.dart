@@ -13,6 +13,8 @@ class SettingsPanel extends StatefulWidget {
   final DeviceType selectedDeviceType;
   final ValueChanged<DeviceType> onDeviceTypeChanged;
   final Future<void> Function()? onRefreshDevice;
+  final VoidCallback? onRequestCameraPermissions;
+  final VoidCallback? onRequestMicPermissions;
 
   const SettingsPanel({
     Key? key,
@@ -26,6 +28,8 @@ class SettingsPanel extends StatefulWidget {
     required this.selectedDeviceType,
     required this.onDeviceTypeChanged,
     this.onRefreshDevice,
+    this.onRequestCameraPermissions,
+    this.onRequestMicPermissions,
   }) : super(key: key);
 
   @override
@@ -182,6 +186,19 @@ class _SettingsPanelState extends State<SettingsPanel> {
                           onPressed: widget.onSavePrefs,
                           child: const Text('Save')),
                     ),
+                    const SizedBox(height: 16),
+                    if (widget.onRequestCameraPermissions != null)
+                      ElevatedButton.icon(
+                        icon: Icon(Icons.privacy_tip),
+                        label: Text('카메라 권한 요청'),
+                        onPressed: widget.onRequestCameraPermissions,
+                      ),
+                    if (widget.onRequestMicPermissions != null)
+                      ElevatedButton.icon(
+                        icon: Icon(Icons.privacy_tip),
+                        label: Text('마이크 권한 요청'),
+                        onPressed: widget.onRequestMicPermissions,
+                      ),
                   ],
                 ),
               ),

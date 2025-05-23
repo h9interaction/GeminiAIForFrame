@@ -30,21 +30,21 @@ class TextInputPanel extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           // 숫자 버튼 4개
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              for (var i = 1; i <= 4; i++)
-                ElevatedButton(
-                  onPressed: () {
-                    final text = buttonTexts[i] ?? '';
-                    if (text.isNotEmpty) {
-                      _handleSubmit(context, text);
-                    }
-                  },
-                  child: Text('$i'),
-                ),
-            ],
-          ),
+          // Row(
+          //   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          //   children: [
+          //     for (var i = 1; i <= 4; i++)
+          //       ElevatedButton(
+          //         onPressed: () {
+          //           final text = buttonTexts[i] ?? '';
+          //           if (text.isNotEmpty) {
+          //             _handleSubmit(context, text);
+          //           }
+          //         },
+          //         child: Text('$i'),
+          //       ),
+          //   ],
+          // ),
           const SizedBox(height: 8),
           Row(
             children: [

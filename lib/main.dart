@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:typed_data';
+import 'dart:io';
 
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
@@ -27,10 +29,43 @@ import 'package:frame_realtime_gemini_voicevision/floating_button_panel.dart';
 import 'device/device_interface.dart';
 import 'device/mobile_device.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_sound/flutter_sound.dart';
+
+List<CameraDescription>? cameras;
+
+Future<void> _setupIOSAudioSession() async {
+  if (Platform.isIOS) {
+    try {
+      const platform = MethodChannel('com.example.app/audio');
+
+      // 1. 먼저 오디오 세션 설정
+      await platform.invokeMethod('setupAudioSession');
+
+      // 2. 잠시 대기
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      // 3. 오디오 세션 활성화
+      await platform.invokeMethod('activateAudioSession');
+
+      // 4. FlutterPcmSound 설정
+      await FlutterPcmSound.setup(
+        sampleRate: 24000,
+        channelCount: 1,
+      );
+
+      debugPrint('iOS 오디오 세션 설정 완료');
+    } catch (e) {
+      debugPrint('iOS 오디오 세션 설정 실패: $e');
+      rethrow;
+    }
+  }
+}
 
 void main() async {
   // 위젯 바인딩 초기화
   WidgetsFlutterBinding.ensureInitialized();
+
+  cameras = await availableCameras();
 
   // 프레임 렌더링 성능 최적화
   await SystemChrome.setPreferredOrientations([
@@ -52,6 +87,8 @@ void main() async {
   // quieten FBP logs
   fbp.FlutterBluePlus.setLogLevel(fbp.LogLevel.info);
 
+  await _setupIOSAudioSession();
+
   runApp(const MainApp());
 }
 
@@ -66,6 +103,8 @@ class MainApp extends StatefulWidget {
 
 /// SimpleFrameAppState mixin helps to manage the lifecycle of the Frame connection outside of this file
 class MainAppState extends State<MainApp> with SimpleFrameAppState {
+  final FlutterSoundRecorder _recorder = FlutterSoundRecorder();
+
   /// realtime voice application members
   late final GeminiRealtime _gemini;
   GeminiVoiceName _voiceName = GeminiVoiceName.Puck;
@@ -86,9 +125,9 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   Stream<Uint8List>? _frameAudioSampleStream;
 
   // Photos: 720px VERY_HIGH quality JPEGs
-  static const resolution = 720;
-  static const qualityIndex = 4;
-  static const qualityLevel = 'VERY_HIGH';
+  static const resolution = 640;
+  static const qualityIndex = 2;
+  static const qualityLevel = 'MEDIUM';
   final RxPhoto _rxPhoto =
       RxPhoto(quality: qualityLevel, resolution: resolution);
   StreamSubscription<Uint8List>? _photoSubs;
@@ -120,7 +159,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   bool _isImageFullscreen = false;
 
   final Map<int, String> buttonTexts = {
-    1: "이거 치워줘.",
+    1: "안녕하세요",
     2: "아보카도 상태 어때?",
     3: "아보카도 어디에 보관해?",
     4: "오늘 날씨 어때?"
@@ -187,22 +226,26 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   }
 
   Future<void> _asyncInit() async {
-    // load up the saved text field data
     await _loadPrefs();
 
-    // Initialize the audio playback framework
-    // (Gemini sends response audio as mono pcm16 24kHz)
     const sampleRate = 24000;
     FlutterPcmSound.setLogLevel(LogLevel.error);
     try {
-      await FlutterPcmSound.setup(sampleRate: sampleRate, channelCount: 1);
-      FlutterPcmSound.start();
-      _addDebugLog('Audio setup successful: $sampleRate Hz, 1 channel');
-      // 버퍼 크기를 더 작게 조정하여 더 자주 피드하도록 함
-      FlutterPcmSound.setFeedThreshold(sampleRate ~/ 30);
       FlutterPcmSound.setFeedCallback(_onFeed);
+      if (Platform.isIOS) {
+        // iOS 전용 오디오 세션 설정
+        await _setupIOSAudioSessionInState();
+      }
+      // 공통 오디오 설정 (Android/iOS 모두 사용)
+      await FlutterPcmSound.setup(
+        sampleRate: sampleRate,
+        channelCount: 1,
+      );
+      FlutterPcmSound.start();
+      debugPrint('Audio setup successful: $sampleRate Hz, 1 channel');
+      FlutterPcmSound.setFeedThreshold(sampleRate ~/ 30);
     } catch (e) {
-      _addDebugLog('Error setting up audio: $e');
+      debugPrint('Error setting up audio: $e');
     }
 
     // then kick off the connection to Frame and start the app if possible, unawaited
@@ -224,7 +267,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
           try {
             await FlutterPcmSound.feed(PcmArrayInt16(bytes: audioData));
           } catch (e) {
-            _addDebugLog('Error feeding audio: $e');
+            debugPrint('Error feeding audio: $e');
           }
         }
       } else {
@@ -302,25 +345,25 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   /// It has a running main loop in this function and also on the Frame (frame_app.lua)
   @override
   Future<void> run() async {
-    _addDebugLog('앱 실행 시작');
+    debugPrint('앱 실행 시작');
 
     _errorMsg = null;
     if (_apiKeyController.text.isEmpty) {
       setState(() {
         _errorMsg = 'Error: Set value for Gemini API Key';
       });
-      _addDebugLog('API 키가 설정되지 않았습니다.');
+      debugPrint('API 키가 설정되지 않았습니다.');
       return;
     }
 
     // 디바이스 타입에 따라 분기
     if (_selectedDeviceType == DeviceType.frame) {
       _isFrameConnected = frame != null;
-      _addDebugLog('Frame 글래스 연결 상태: ${_isFrameConnected ? "연결됨" : "연결되지 않음"}');
+      debugPrint('Frame 글래스 연결 상태: ${_isFrameConnected ? "연결됨" : "연결되지 않음"}');
       if (!_isFrameConnected) {
         _gemini.setMode(GeminiMode.textOnly);
         _appendEvent('Frame 글래스가 연결되지 않아 텍스트 전용 모드로 실행됩니다.');
-        _addDebugLog('텍스트 전용 모드로 설정됨');
+        debugPrint('텍스트 전용 모드로 설정됨');
         // return;
       }
       // (기존 Frame 연결 및 스트림 로직)
@@ -345,16 +388,16 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
 
     try {
       // connect to Gemini realtime
-      _addDebugLog('Gemini 연결 시도...');
+      debugPrint('Gemini 연결 시도...');
       await _gemini.connect(_apiKeyController.text, _voiceName,
           _systemInstructionController.text);
 
       if (!_gemini.isConnected()) {
-        _log.severe('Connection to Gemini failed');
-        _addDebugLog('Gemini 연결 실패');
+        debugPrint('Connection to Gemini failed');
+        debugPrint('Gemini 연결 실패');
         return;
       }
-      _addDebugLog('Gemini 연결 성공');
+      debugPrint('Gemini 연결 성공');
 
       setState(() {
         currentState = ApplicationState.running;
@@ -362,7 +405,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
 
       if (_isFrameConnected) {
         // Frame 글래스가 연결된 경우에만 기존 로직 실행
-        _addDebugLog('Frame 글래스 기능 초기화 시작');
+        debugPrint('Frame 글래스 기능 초기화 시작');
         await frame!.sendMessage(0x10, TxCode(value: 1).pack());
         await frame!.sendMessage(
             0x0b, TxPlainText(text: 'Double tap to resume!').pack());
@@ -385,22 +428,22 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
           }
           _isTapProcessing = false;
         });
-        _addDebugLog('Frame 글래스 기능 초기화 완료');
+        debugPrint('Frame 글래스 기능 초기화 완료');
         // 앱 초기화 후 자동으로 더블탭 이벤트 트리거 (라이브 스트림 자동 시작)
         Future.delayed(const Duration(milliseconds: 500), () async {
           if (_gemini.isConnected() && !_streaming) {
-            _addDebugLog('자동 더블탭 트리거: 라이브 스트림 시작');
+            debugPrint('자동 더블탭 트리거: 라이브 스트림 시작');
             await _startFrameStreaming();
           }
         });
       } else {
-        _addDebugLog('Frame 글래스가 연결되지 않아 텍스트 전용 모드로 실행됩니다.');
+        debugPrint('Frame 글래스가 연결되지 않아 텍스트 전용 모드로 실행됩니다.');
         _appendEvent('텍스트 입력을 시작할 수 있습니다.');
       }
     } catch (e) {
       _errorMsg = 'Error executing application logic: $e';
-      _log.fine(_errorMsg);
-      _addDebugLog('앱 실행 중 오류 발생: $e');
+      debugPrint(_errorMsg);
+      debugPrint('앱 실행 중 오류 발생: $e');
 
       setState(() {
         currentState = ApplicationState.ready;
@@ -443,16 +486,16 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   /// audio and photo streaming on Frame
   Future<void> _startFrameStreaming() async {
     _appendEvent('Starting Frame Streaming');
-    _addDebugLog('Starting Frame Streaming');
+    debugPrint('Starting Frame Streaming');
 
     try {
       // 오디오 재생 시작 전에 이전 세션 정리
       FlutterPcmSound.release();
       await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
       FlutterPcmSound.start();
-      _addDebugLog('Audio playback started');
+      debugPrint('Audio playback started');
     } catch (e) {
-      _addDebugLog('Error starting audio playback: $e');
+      debugPrint('Error starting audio playback: $e');
     }
 
     _streaming = true;
@@ -461,16 +504,16 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       _frameAudioSampleStream = _rxAudio.attach(frame!.dataResponse);
       _frameAudioSubs?.cancel();
       _frameAudioSubs = _frameAudioSampleStream!.listen((data) {
-        _addDebugLog('Received audio data: ${data.length} bytes');
+        debugPrint('Received audio data: ${data.length} bytes');
         _handleFrameAudio(data);
       });
 
       await frame!.sendMessage(0x30, TxCode(value: 1).pack());
-      _addDebugLog('Sent AUDIO_SUBS_MSG with value 1');
+      debugPrint('Sent AUDIO_SUBS_MSG with value 1');
 
       await frame!
           .sendMessage(0x0b, TxPlainText(text: 'AI Listening...').pack());
-      _addDebugLog('Sent TEXT_MSG: AI Listening...');
+      debugPrint('Sent TEXT_MSG: AI Listening...');
 
       await _requestPhoto();
       _photoTimer =
@@ -478,14 +521,14 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
         if (!_streaming) {
           timer.cancel();
           _photoTimer = null;
-          _addDebugLog('Photo timer cancelled');
+          debugPrint('Photo timer cancelled');
           return;
         }
         await _requestPhoto();
       });
     } catch (e) {
-      _addDebugLog('Error in _startFrameStreaming: $e');
-      _log.warning(() => 'Error executing application logic: $e');
+      debugPrint('Error in _startFrameStreaming: $e');
+      debugPrint('Error executing application logic: $e');
     }
   }
 
@@ -494,7 +537,7 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   /// and the Gemini conversation needs to stop too
   Future<void> _stopFrameStreaming() async {
     _streaming = false;
-    _addDebugLog('Stopping Frame Streaming');
+    debugPrint('Stopping Frame Streaming');
 
     _gemini.stopResponseAudio();
     _playingAudio = false;
@@ -503,17 +546,17 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
     _photoTimer = null;
 
     await frame!.sendMessage(0x30, TxCode(value: 0).pack());
-    _addDebugLog('Sent AUDIO_SUBS_MSG with value 0');
+    debugPrint('Sent AUDIO_SUBS_MSG with value 0');
 
     _rxAudio.detach();
-    _addDebugLog('Audio stream detached');
+    debugPrint('Audio stream detached');
 
     _appendEvent('Ending Frame Streaming');
   }
 
   /// Request a photo from Frame
   Future<void> _requestPhoto() async {
-    _log.info('requesting photo from Frame');
+    debugPrint('requesting photo from Frame');
 
     // prepare to receive the photo from Frame
     // this must happen each time as the stream
@@ -535,17 +578,17 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   void _handleFrameAudio(Uint8List pcm16x8) {
     if (_gemini.isConnected()) {
       var pcm16x16 = AudioUpsampler.upsample8kTo16k(pcm16x8);
-      _addDebugLog('Upsampled audio: ${pcm16x16.length} bytes');
+      debugPrint('Upsampled audio: ${pcm16x16.length} bytes');
       _gemini.sendAudio(pcm16x16);
     }
   }
 
   /// pass the photo from Frame to the API
   void _handleFramePhoto(Uint8List jpegBytes) {
-    _addDebugLog('Received photo: ${jpegBytes.length} bytes');
+    debugPrint('Received photo: ${jpegBytes.length} bytes');
     if (_gemini.isConnected()) {
       _gemini.sendPhoto(jpegBytes);
-      _addDebugLog('Sent photo to Gemini');
+      debugPrint('Sent photo to Gemini');
     }
 
     // 이전 이미지 참조 제거
@@ -561,15 +604,15 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
   void _audioReadyCallback() {
     if (!_playingAudio) {
       _playingAudio = true;
-      _addDebugLog('Audio ready callback triggered');
+      debugPrint('Audio ready callback triggered');
       // Frame이 연결되어 있을 때만 Frame에 메시지 전송
       if (_isFrameConnected && frame != null) {
         frame!.sendMessage(0x0b, TxPlainText(text: 'AI Speaking...').pack());
-        _addDebugLog('Sent TEXT_MSG: AI Speaking...');
+        debugPrint('Sent TEXT_MSG: AI Speaking...');
       }
       // 오디오 재생은 항상 실행
       _onFeed(0);
-      _log.fine('Response audio started');
+      debugPrint('Response audio started');
     }
   }
 
@@ -734,11 +777,10 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
                             if (_isFrameConnected && frame != null) {
                               frame!.sendMessage(0x0b,
                                   TxPlainText(text: 'AI Listening...').pack());
-                              _addDebugLog('Sent TEXT_MSG: AI Listening...');
+                              debugPrint('Sent TEXT_MSG: AI Listening...');
                             }
                             _appendEvent('AI Listening...');
-                            _addDebugLog(
-                                '오디오 응답 즉시 중단 및 AI Listening... 상태 전환');
+                            debugPrint('오디오 응답 즉시 중단 및 AI Listening... 상태 전환');
                           },
                           // micButtonWidget: getFloatingActionButtonWidget(
                           //     const Icon(Icons.mic), const Icon(Icons.mic_off)),
@@ -785,6 +827,8 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
                           await _switchDevice(_selectedDeviceType);
                           _appendEvent('앱이 완전히 초기화되고 새로 시작되었습니다.');
                         },
+                        onRequestCameraPermissions: requestCameraPermissions,
+                        onRequestMicPermissions: requestMicPermissions,
                       ),
                     ),
                 ],
@@ -796,35 +840,35 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
 
   // 텍스트 전송 처리 함수 수정
   void _handleTextSubmission(String text) {
-    _addDebugLog('텍스트 전송 시도: $text');
+    debugPrint('텍스트 전송 시도: $text');
 
     if (text.isEmpty) {
-      _addDebugLog('텍스트가 비어있어 전송하지 않습니다.');
+      debugPrint('텍스트가 비어있어 전송하지 않습니다.');
       return;
     }
 
     // AI가 오디오 재생 중이면 즉시 중단
     if (_playingAudio || _gemini.isSpeaking()) {
-      _addDebugLog('AI 오디오 재생 중단 요청');
+      debugPrint('AI 오디오 재생 중단 요청');
       _gemini.stopResponseAudio();
       _playingAudio = false;
       // 필요시 FlutterPcmSound.release(); // 오디오 장치 완전 해제
     }
 
     if (!_gemini.isConnected()) {
-      _addDebugLog('Gemini가 연결되지 않아 전송할 수 없습니다.');
+      debugPrint('Gemini가 연결되지 않아 전송할 수 없습니다.');
       _appendEvent('Gemini가 연결되지 않았습니다. 연결을 확인해주세요.');
       return;
     }
 
     try {
-      _addDebugLog('현재 Gemini 모드: ${_gemini.getCurrentMode()}');
+      debugPrint('현재 Gemini 모드: ${_gemini.getCurrentMode()}');
       _gemini.sendText(text);
       _textInputController.clear();
       _appendEvent('사용자 : $text');
-      _addDebugLog('텍스트 전송 완료');
+      debugPrint('텍스트 전송 완료');
     } catch (e) {
-      _addDebugLog('텍스트 전송 중 오류 발생: $e');
+      debugPrint('텍스트 전송 중 오류 발생: $e');
       _appendEvent('텍스트 전송 실패: $e');
     }
   }
@@ -888,6 +932,21 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
 
       // MobileDevice 생성 및 초기화
       _mobileDevice = MobileDevice();
+      if (cameras != null && cameras!.isNotEmpty) {
+        final tmp = CameraController(
+          cameras![0],
+          Platform.isIOS
+              ? ResolutionPreset.low
+              : ResolutionPreset.medium, // iOS/Android 분기
+          enableAudio: false,
+          imageFormatGroup: Platform.isIOS
+              ? ImageFormatGroup.bgra8888
+              : ImageFormatGroup.yuv420, // iOS/Android 분기
+        );
+        await tmp.initialize();
+        await tmp.setFlashMode(FlashMode.off);
+        await tmp.dispose();
+      }
       await _mobileDevice!.initialize();
       // 사진 스트림 listen
       _mobilePhotoSubs = _mobileDevice!.photoStream.listen((bytes) {
@@ -895,15 +954,15 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
           _image = Image.memory(bytes, gaplessPlayback: true);
         });
         if (_gemini.isConnected()) {
-          _addDebugLog('MobileDevice photoStream: sendPhoto 호출');
+          debugPrint('MobileDevice photoStream: sendPhoto 호출');
           _gemini.sendPhoto(bytes);
         }
       });
       // 오디오 스트림 listen
       _mobileAudioSubs = _mobileDevice!.audioStream.listen((pcmBytes) {
-        _addDebugLog('MobileDevice audioStream: ${pcmBytes.length} bytes');
+        debugPrint('MobileDevice audioStream: ${pcmBytes.length} bytes');
         if (_gemini.isConnected()) {
-          _addDebugLog('MobileDevice audioStream: sendAudio 호출');
+          debugPrint('MobileDevice audioStream: sendAudio 호출');
           _gemini.sendAudio(pcmBytes);
         }
       });
@@ -913,17 +972,187 @@ class MainAppState extends State<MainApp> with SimpleFrameAppState {
       await _mobileDevice!.startPhotoCapture(const Duration(milliseconds: 500));
 
       // **여기서 오디오 재생 세팅**
-      await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
-      FlutterPcmSound.start();
+      try {
+        FlutterPcmSound.setFeedCallback(_onFeed);
+        await FlutterPcmSound.setup(sampleRate: 24000, channelCount: 1);
+        FlutterPcmSound.start();
+        FlutterPcmSound.setFeedThreshold(24000 ~/ 30);
+      } catch (e) {
+        debugPrint('FlutterPcmSound 초기화 실패: $e');
+      }
 
-      // 카메라 프리뷰 스트림 구독
-      _mobilePreviewSubs = _mobileDevice!.previewStream.listen((preview) {
-        setState(() {
-          _cameraPreview = preview;
+      // 카메라 프리뷰 스트림 구독 (안정성을 위해 재등록 및 로그 추가)
+      _mobilePreviewSubs?.cancel();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _mobilePreviewSubs = _mobileDevice!.previewStream.listen((preview) {
+          debugPrint('카메라 프리뷰 수신됨');
+          setState(() {
+            _cameraPreview = preview;
+          });
         });
+        _mobileDevice!.refreshPreview();
       });
 
       await run();
     }
+  }
+
+  Future<void> requestCameraPermissions() async {
+    if (Platform.isIOS) {
+      try {
+        // iOS에서는 권한 요청 전에 Info.plist 설정 확인
+        final status = await Permission.camera.status;
+        if (!status.isGranted) {
+          final result = await Permission.camera.request();
+          if (!result.isGranted) {
+            _appendEvent('카메라 권한이 필요합니다. 설정에서 권한을 허용해 주세요.');
+            return;
+          }
+        }
+
+        // 권한이 있는 경우에만 카메라 초기화
+        final controller = CameraController(
+          cameras![0],
+          ResolutionPreset.low,
+          enableAudio: false,
+          imageFormatGroup: ImageFormatGroup.bgra8888,
+        );
+        await controller.initialize();
+        await controller.dispose();
+        _appendEvent('카메라 권한이 허용되었습니다.');
+      } catch (e) {
+        _appendEvent('카메라 오류 : $e');
+      }
+    } else if (Platform.isAndroid) {
+      // 기존 Android 코드 유지
+      var cameraStatus = await Permission.camera.request();
+      if (!cameraStatus.isGranted) {
+        _appendEvent('카메라 권한이 허용되지 않았습니다. 설정에서 권한을 허용해 주세요.');
+        openAppSettings();
+      } else {
+        _appendEvent('카메라 권한이 허용되었습니다.');
+      }
+    }
+  }
+
+  Future<void> requestMicPermissions() async {
+    if (Platform.isIOS) {
+      try {
+        await _recorder.openRecorder();
+        await _recorder.closeRecorder();
+      } catch (e) {
+        _appendEvent('마이크 오류 : $e');
+      }
+    } else {
+      var micStatus = await Permission.microphone.request();
+
+      if (!micStatus.isGranted) {
+        _appendEvent('마이크 권한이 허용되지 않았습니다. 설정에서 권한을 허용해 주세요.');
+        openAppSettings();
+      } else {
+        _appendEvent('마이크 권한이 허용되었습니다.');
+      }
+    }
+  }
+
+  Future<void> _setupIOSAudioSessionInState() async {
+    if (Platform.isIOS) {
+      try {
+        const platform = MethodChannel('com.example.app/audio');
+        await platform.invokeMethod('setupAudioSession', {
+          'category': 'AVAudioSessionCategoryPlayAndRecord',
+          'mode': 'AVAudioSessionModeDefault',
+          'options': [
+            'AVAudioSessionCategoryOptionAllowBluetooth',
+            'AVAudioSessionCategoryOptionAllowBluetoothA2DP',
+            'AVAudioSessionCategoryOptionMixWithOthers',
+          ],
+          'preferredSampleRate': 24000.0,
+          'preferredIOBufferDuration': 0.005,
+        });
+      } catch (e) {
+        debugPrint('iOS Audio Session setup failed: $e');
+      }
+    }
+  }
+
+  Future<void> _initializeMobileDevice() async {
+    try {
+      // 1. 먼저 모든 필요한 권한을 한번에 체크
+      Map<Permission, PermissionStatus> statuses = await [
+        Permission.camera,
+        Permission.microphone,
+      ].request();
+
+      bool allPermissionsGranted =
+          statuses.values.every((status) => status.isGranted);
+
+      if (!allPermissionsGranted) {
+        _appendEvent('필요한 모든 권한이 허용되지 않았습니다.');
+        return;
+      }
+
+      // 2. 카메라 초기화 전에 AVAudioSession 설정
+      if (Platform.isIOS) {
+        await _setupIOSAudioSession();
+      }
+
+      // 3. 카메라 초기화
+      if (cameras != null && cameras!.isNotEmpty) {
+        final controller = CameraController(
+          cameras![0],
+          ResolutionPreset.low,
+          enableAudio: false,
+          imageFormatGroup: ImageFormatGroup.bgra8888,
+        );
+
+        await controller.initialize();
+        await controller.setFlashMode(FlashMode.off);
+        await controller.dispose();
+      }
+
+      // 4. MobileDevice 초기화
+      _mobileDevice = MobileDevice();
+      await _mobileDevice!.initialize();
+
+      // 5. 스트림 설정
+      _setupStreams();
+    } catch (e) {
+      debugPrint('초기화 중 오류 발생: $e');
+      _appendEvent('초기화 중 오류가 발생했습니다: $e');
+    }
+  }
+
+  void _setupStreams() {
+    // 사진 스트림
+    _mobilePhotoSubs = _mobileDevice!.photoStream.listen((bytes) {
+      setState(() {
+        _image = Image.memory(bytes, gaplessPlayback: true);
+      });
+      if (_gemini.isConnected()) {
+        debugPrint('MobileDevice photoStream: sendPhoto 호출');
+        _gemini.sendPhoto(bytes);
+      }
+    }, onError: (error) {
+      debugPrint('사진 스트림 오류: $error');
+    });
+
+    // 오디오 스트림
+    _mobileAudioSubs = _mobileDevice!.audioStream.listen((pcmBytes) {
+      if (_gemini.isConnected()) {
+        _gemini.sendAudio(pcmBytes);
+      }
+    }, onError: (error) {
+      debugPrint('오디오 스트림 오류: $error');
+    });
+  }
+
+  Future<bool> checkAllPermissions() async {
+    final cameraStatus = await Permission.camera.status;
+    final micStatus = await Permission.microphone.status;
+    if (!cameraStatus.isGranted) await Permission.camera.request();
+    if (!micStatus.isGranted) await Permission.microphone.request();
+    return (await Permission.camera.status).isGranted &&
+        (await Permission.microphone.status).isGranted;
   }
 }

@@ -20,7 +20,7 @@ class FloatingButtonPanel extends StatelessWidget {
       children: [
         // Stop(정지) 플로팅 버튼: 오디오 응답 즉시 멈추고 AI Listening... 상태로 전환
         Positioned(
-          bottom: 155,
+          bottom: 105,
           right: 15,
           child: FloatingActionButton(
             onPressed: (isPlayingAudio || isSpeaking) ? onStopPressed : null,
